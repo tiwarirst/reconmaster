@@ -71,7 +71,7 @@ class CertTransparencyModule(ReconModule):
                             # crt.sh can return multiple domains separated by newlines
                             for sub in name.split("\n"):
                                 sub = sub.strip().lower()
-                                if sub.endswith(f".{domain}") and not sub.startswith("*."):
+                                if (sub == domain or sub.endswith(f".{domain}")) and not sub.startswith("*."):
                                     subdomains.add(sub)
         except Exception as e:
             self.logger.warning(f"Failed to query crt.sh for {domain}: {e}", module=self.config.name)

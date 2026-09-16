@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-import subprocess
 
 from reconai.core.events.types import EventType
 from reconai.modules.base import ModuleConfig, ReconModule

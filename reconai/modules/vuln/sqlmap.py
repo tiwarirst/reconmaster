@@ -40,7 +40,7 @@ class SqlmapModule(ReconModule):
         # SQLMap is heavy, limit concurrency
         semaphore = asyncio.Semaphore(1)
         tasks = [self._test_sqli(adapter, semaphore, url) for url in urls[:10]] # Safety limit
-        await asyncio.gather(*tasks)
+        await asyncio.gather(*tasks, return_exceptions=True)
 
         self.logger.module_complete(self.config.name)
 

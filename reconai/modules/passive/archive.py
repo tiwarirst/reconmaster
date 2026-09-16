@@ -61,8 +61,9 @@ class ArchiveModule(ReconModule):
                 await self.events.emit_discovery(
                     event_type=EventType.URL_DISCOVERED,
                     source=self.config.name,
-                    data={"url": u, "status": None},
+                    data={"url": u, "status": 0},
                     scan_id=self.scan_id,
+
                     target=self.target
                 )
                 
