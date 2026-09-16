@@ -1,26 +1,177 @@
+# ════════════════════════════════════════════════════════════════════
+#  ReconAI — .gitignore
+#  Offensive Security / Reconnaissance Tool
+# ════════════════════════════════════════════════════════════════════
+
+
+# ── Python ────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.venv/
-venv/
-env/
+*.pyd
+*.pyo
+*.pyc
+
+# Packaging / Distribution
+*.egg
 *.egg-info/
 dist/
 build/
 .eggs/
-*.egg
+wheels/
+MANIFEST
+pip-wheel-metadata/
+share/python-wheels/
+
+# ── Virtual Environments ──────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.env/
+venv.bak/
+
+
+# ── Static Analysis / Linters ────────────────────────────────────────
 .mypy_cache/
 .ruff_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+.pyre/
+
+
+# ── Testing & Coverage ────────────────────────────────────────────────
 .pytest_cache/
+.tox/
+.nox/
 htmlcov/
 .coverage
+.coverage.*
+coverage.xml
+*.cover
+nosetests.xml
+test-results.xml
+
+
+# ── IDE / Editor ──────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.sublime-project
+*.sublime-workspace
+.ropeproject/
+
+
+# ── OS Artifacts ──────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+
+# ── Logs & Temp Files ─────────────────────────────────────────────────
 *.log
+*.log.*
+logs/
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+
+
+# ── ReconAI — Scan Output ────────────────────────────────────────────
+#  All scan artefacts are written to output/ at runtime — never commit.
 output/
+scans/
+screenshots/
+reports/*.json
+reports/*.html
+reports/*.md
+reports/*.pdf
+
+# Nuclei temp files
+nuclei_*.jsonl
+nuclei_*.json
+.nuclei_tmp/
+
+# SQLmap / Dalfox / Katana run artefacts
+sqlmap_output/
+dalfox_output/
+katana_output/
+*.xml.bak
+
+
+# ── Databases ─────────────────────────────────────────────────────────
 *.db
 *.sqlite
-.env
+*.sqlite3
+reconai.db
+recon_*.db
 
-# Local planning notes
+# CVE / KEV intelligence cache (regenerated automatically at runtime)
+reconai/intelligence/cache/
+cache/
+
+
+# ── Secrets & Credentials ────────────────────────────────────────────
+#  NEVER commit API keys, tokens, or config with real credentials.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+config.local.yaml
+secrets.yaml
+api_keys.yaml
+
+
+# ── Docker / Containers ──────────────────────────────────────────────
+*.env.docker
+docker-compose.override.yml
+.docker/
+
+
+# ── Docs Artefacts ───────────────────────────────────────────────────
+docs/_build/
+docs/site/
+site/
+*.pdf
+!docs/**/*.pdf
+
+
+# ── Planning / Internal Notes (not for version control) ──────────────
 /implementation_plan.md
 /task.md
+/walkthrough.md
+/scratch/
+notes/
+TODO.local.md
+
+
+# ── Jupyter Notebooks ────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+
+# ── Misc ──────────────────────────────────────────────────────────────
+*.pid
+*.seed
+*.pid.lock
+*.gz
+*.tar
+*.zip
+*.rar

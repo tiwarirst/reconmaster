@@ -6,12 +6,22 @@ Enables loose coupling between modules:
 - HTTP module listens → probes the resolved host
 
 No module needs to know about any other module.
+
+Fix applied (Flaw 13):
+  Event history previously used a plain list with a slice assignment
+  (_history = _history[-max_history:]) on every overflow. Two problems:
+    1. The slice is O(n) — copies the whole list.
+    2. It discards the EARLIEST events (scan start, first discoveries)
+       which are the most useful for debugging.
+
+  Fix: collections.deque(maxlen=N) — O(1) append, auto-evicts from the
+  LEFT (oldest first), and requires zero manual trimming logic.
 """
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
-from typing import Callable, Coroutine, Any
+from collections import deque
+from typing import Any, Callable, Coroutine
 
 from reconai.core.events.types import Event, EventType
 
@@ -26,15 +36,16 @@ class EventBus:
     Supports:
     - Subscribe/unsubscribe to event types
     - Emit events to all subscribers
-    - Wildcard subscriptions (subscribe to all events)
-    - Event history for debugging
-    - Async handlers
+    - Wildcard subscriptions (subscribe to all events with "*")
+    - Fixed-size circular event history (oldest events auto-evicted)
+    - Async handlers with failure isolation
     """
 
-    def __init__(self, max_history: int = 1000):
-        self._handlers: dict[EventType | str, list[EventHandler]] = defaultdict(list)
-        self._history: list[Event] = []
-        self._max_history = max_history
+    def __init__(self, max_history: int = 1000) -> None:
+        self._handlers: dict[EventType | str, list[EventHandler]] = {}
+        # deque with maxlen: O(1) append, auto-evicts oldest from left,
+        # no manual slice trimming needed, no O(n) copy on overflow.
+        self._history: deque[Event] = deque(maxlen=max_history)
         self._lock = asyncio.Lock()
 
     def subscribe(self, event_type: EventType | str, handler: EventHandler) -> None:
@@ -42,8 +53,10 @@ class EventBus:
 
         Args:
             event_type: The event type to listen for, or "*" for all events.
-            handler: Async function that receives an Event.
+            handler:    Async function that receives an Event.
         """
+        if event_type not in self._handlers:
+            self._handlers[event_type] = []
         self._handlers[event_type].append(handler)
 
     def unsubscribe(self, event_type: EventType | str, handler: EventHandler) -> None:
@@ -58,25 +71,19 @@ class EventBus:
         Handlers are called concurrently. A failing handler
         does not prevent other handlers from receiving the event.
         """
-        # Store in history
         async with self._lock:
-            self._history.append(event)
-            if len(self._history) > self._max_history:
-                self._history = self._history[-self._max_history:]
+            self._history.append(event)  # O(1), auto-evicts oldest if full
 
-        # Collect handlers
+        # Collect specific + wildcard handlers
         handlers = list(self._handlers.get(event.type, []))
         handlers.extend(self._handlers.get("*", []))
 
         if not handlers:
             return
 
-        # Execute handlers concurrently, isolating failures
-        tasks = []
-        for handler in handlers:
-            tasks.append(self._safe_call(handler, event))
-
-        await asyncio.gather(*tasks)
+        await asyncio.gather(
+            *(self._safe_call(h, event) for h in handlers)
+        )
 
     async def emit_discovery(
         self,
@@ -102,7 +109,8 @@ class EventBus:
         try:
             await handler(event)
         except Exception:
-            # Log but don't propagate — one handler failure shouldn't break others
+            # One handler failure must never prevent other handlers
+            # from receiving the event — swallow and continue.
             pass
 
     def get_history(
@@ -112,7 +120,7 @@ class EventBus:
         limit: int = 100,
     ) -> list[Event]:
         """Get event history, optionally filtered."""
-        events = self._history
+        events: list[Event] = list(self._history)
         if event_type:
             events = [e for e in events if e.type == event_type]
         if source:

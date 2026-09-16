@@ -5,7 +5,7 @@ Provides validated, typed configuration models used throughout the platform.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, Field
 
@@ -83,21 +83,23 @@ class ScanLimitConfig(BaseModel):
 
 class OutputConfig(BaseModel):
     """Output and storage configuration."""
-    base_dir: str = OUTPUT["base_dir"]
-    save_raw: bool = OUTPUT["save_raw"]
-    save_normalized: bool = OUTPUT["save_normalized"]
-    save_logs: bool = OUTPUT["save_logs"]
-    report_formats: list[str] = Field(default_factory=lambda: OUTPUT["report_formats"])
+    base_dir: str = str(OUTPUT["base_dir"])
+    save_raw: bool = bool(OUTPUT["save_raw"])
+    save_normalized: bool = bool(OUTPUT["save_normalized"])
+    save_logs: bool = bool(OUTPUT["save_logs"])
+    report_formats: list[str] = Field(
+        default_factory=lambda: cast(list[str], OUTPUT["report_formats"])
+    )
 
 
 class CacheConfig(BaseModel):
     """Caching configuration with TTL values."""
-    enabled: bool = CACHE["enabled"]
-    ttl_dns: int = CACHE["ttl_dns"]
-    ttl_http: int = CACHE["ttl_http"]
-    ttl_certificate: int = CACHE["ttl_certificate"]
-    ttl_technology: int = CACHE["ttl_technology"]
-    ttl_default: int = CACHE["ttl_default"]
+    enabled: bool = bool(CACHE["enabled"])
+    ttl_dns: int = int(CACHE["ttl_dns"])
+    ttl_http: int = int(CACHE["ttl_http"])
+    ttl_certificate: int = int(CACHE["ttl_certificate"])
+    ttl_technology: int = int(CACHE["ttl_technology"])
+    ttl_default: int = int(CACHE["ttl_default"])
 
     def get_ttl(self, key: str) -> int:
         attr = f"ttl_{key}"

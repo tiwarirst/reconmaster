@@ -8,7 +8,7 @@ import json
 import sys
 
 
-def run_mcp_server():
+def run_mcp_server() -> None:
     """Minimal stdio-based MCP server stub.
     
     In a full implementation, this would use the official MCP Python SDK

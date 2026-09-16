@@ -61,8 +61,8 @@ class Orchestrator:
         self.db.connect()
         self._register_event_handlers()
         
-        self.modules_to_run = []
-        self.results = {}
+        self.modules_to_run: list[Any] = []
+        self.results: dict[str, Any] = {}
 
     def _register_event_handlers(self) -> None:
         """Register central event handlers."""
@@ -71,7 +71,7 @@ class Orchestrator:
         self.events.subscribe(EventType.SCAN_FAILED, self._on_scan_failed)
         
         # Logging bridge
-        async def log_event(event: Event):
+        async def log_event(event: Event) -> None:
             if event.is_error:
                 self.logger.error(f"Event Error [{event.source}]: {event.data.get('error', 'unknown')}")
         self.events.subscribe("*", log_event)
@@ -105,7 +105,14 @@ class Orchestrator:
         for name in module_names:
             try:
                 mod_class = ModuleRegistry.get(name)
-                mod_instance = mod_class(db=self.db, events=self.events, logger=self.logger, runner=self.runner)
+                mod_instance = mod_class(
+                    db=self.db,
+                    events=self.events,
+                    logger=self.logger,
+                    runner=self.runner,
+                    out_dir=self.out_dir,
+                    timeout=self.config.config.timeouts.get("default"),
+                )
                 mod_instance.scan_id = self.scan_id
                 mod_instance.target = self.target
                 self.modules_to_run.append(mod_instance)
@@ -125,7 +132,22 @@ class Orchestrator:
         self.db.create_scan(scan_record)
 
     async def run(self) -> None:
-        """Execute all planned modules sequentially/concurrently."""
+        """Execute all planned modules sequentially.
+
+        Every module receives a standardized kwargs dict containing at minimum:
+          - target:  the raw target string (may include scheme/path)
+          - domain:  the clean hostname (scheme and path stripped)
+          - domains: list[str] — same as [domain], provided for convenience
+                     so modules don't each have to re-parse the target.
+
+        Modules that need nothing beyond the DB (e.g. port_scan reading IPs)
+        simply ignore the kwargs they don't need. Modules that need domains
+        (passive scanners) use kwargs["domains"] directly.
+
+        This eliminates the previous pattern where only passive modules received
+        meaningful input and all others silently fell through to empty-list DB
+        reads — which would produce zero output if a previous module failed.
+        """
         start_time = time.monotonic()
         self.db.update_scan_status(self.scan_id, ScanStatus.RUNNING)
         await self.events.emit(Event(type=EventType.SCAN_STARTED, source="orchestrator", scan_id=self.scan_id, target=self.target))
@@ -149,20 +171,22 @@ class Orchestrator:
                 # Run module
                 try:
                     mod_start = time.monotonic()
-                    # Determine initial input data based on module type
-                    kwargs = {}
-                    if module.config.category == "passive" or module.config.name == "subdomains_active":
-                        kwargs["domains"] = [self.target] if not "://" in self.target else [self.target.split("://")[-1].split("/")[0]]
-                        
-                    await module.run(**kwargs)
+
+                    # Build a standardized kwargs dict for every module.
+                    # Every module receives the same context — no special cases.
+                    # Modules that don't need a field simply ignore it.
+                    await module.run(**_build_module_kwargs(self.target))
+
                     mod_duration = time.monotonic() - mod_start
-                    self.console.success(f"Completed in {mod_duration:.1f}s", module=module.config.name)
+                    self.console.success(
+                        f"Completed in {mod_duration:.1f}s", module=module.config.name
+                    )
                     modules_completed += 1
                 except Exception as e:
                     self.console.error(f"Module failed: {e}", module=module.config.name)
                     self.logger.error(f"Module {module.config.name} exception: {e}")
                     modules_failed += 1
-                    warnings.append(f"{module.config.name}: Exception occurred")
+                    warnings.append(f"{module.config.name}: {type(e).__name__}: {e}")
                     
         except asyncio.CancelledError:
             self.console.warning("Scan cancelled by user")
@@ -191,12 +215,48 @@ class Orchestrator:
         
         await self.events.emit(Event(type=EventType.SCAN_COMPLETED, source="orchestrator", scan_id=self.scan_id, target=self.target))
         
-        # Display Summary
-        stats = self.db.get_scan_stats(self.scan_id)
-        stats["Duration"] = f"{duration:.1f}s"
-        stats["Modules run"] = f"{modules_completed} / {len(self.modules_to_run)}"
-        
+        # Display Summary — copy into Any-typed dict so we can add string values
+        raw_stats = self.db.get_scan_stats(self.scan_id)
+        display_stats: dict[str, Any] = dict(raw_stats)
+        display_stats["Duration"] = f"{duration:.1f}s"
+        display_stats["Modules run"] = f"{modules_completed} / {len(self.modules_to_run)}"
+
         report_path = ""
         # TODO: Trigger report generation here if requested
-        
-        self.console.summary(stats, warnings, report_path)
+
+        self.console.summary(display_stats, warnings, report_path)
+
+
+# ── Module-level helpers ──────────────────────────────────────────────────────
+
+def _build_module_kwargs(target: str) -> dict[str, Any]:
+    """Build the standardized kwargs dict passed to every module's run().
+
+    Every module receives the same set of keys so there are no special cases
+    in the orchestrator loop. Modules simply ignore the fields they don't need.
+
+    Keys provided:
+        target  — the raw target as supplied by the user
+        domain  — clean hostname (scheme, port, and path stripped)
+        domains — list containing the single domain (convenience for modules
+                  that accept a list, e.g. dns_enum, subdomains_active)
+
+    Examples:
+        "example.com"           → domain = "example.com"
+        "https://example.com"   → domain = "example.com"
+        "http://example.com/a"  → domain = "example.com"
+    """
+    # Strip scheme if present
+    if "://" in target:
+        raw = target.split("://", 1)[1]
+    else:
+        raw = target
+
+    # Strip path and fragment
+    domain = raw.split("/")[0].split("#")[0].split("?")[0]
+
+    return {
+        "target":  target,
+        "domain":  domain,
+        "domains": [domain],
+    }

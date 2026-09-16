@@ -76,7 +76,7 @@ class HostBrowserCrawlerModule(ReconModule):
         self.logger.module_start(self.config.name, target=f"{len(target_urls)} URLs")
 
         if await self._is_browser_available(cdp_endpoint):
-            self.logger.success(
+            self.logger.info(
                 f"[STEALTH] Connected to real browser at {cdp_endpoint} — "
                 f"using your live sessions (max stealth mode)"
             )
@@ -320,14 +320,20 @@ class HostBrowserCrawlerModule(ReconModule):
     # ────────────────────────────────────────────────────────────────────────
     # Helpers
     # ────────────────────────────────────────────────────────────────────────
-    async def _save_results(self, discovered: set, api_calls: set, source: str) -> None:
+    async def _save_results(self, discovered: set[str], api_calls: set[str], source: str) -> None:
         self.logger.info(
             f"[STEALTH] Saving {len(discovered)} pages, {len(api_calls)} API calls..."
         )
         for url in discovered:
             record = URLRecord(scan_id=self.scan_id, url=url, method="GET", source=source)
             self.db.insert_url(record)
-            self.event_bus.emit(EventType.URL_FOUND, {"url": url, "source": source})
+            await self.event_bus.emit_discovery(
+                event_type=EventType.URL_DISCOVERED,
+                source=source,
+                data={"url": url, "source": source},
+                scan_id=self.scan_id,
+                target=self.target,
+            )
 
         for api_url in api_calls:
             record = URLRecord(

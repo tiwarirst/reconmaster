@@ -163,6 +163,9 @@ class CommandRunner:
 
                 # Stream output with timeout
                 try:
+                    # stdout/stderr are guaranteed non-None since we used stdout=PIPE
+                    assert process.stdout is not None
+                    assert process.stderr is not None
                     stdout_task = asyncio.create_task(
                         stream_handler.stream_stdout(process.stdout)
                     )

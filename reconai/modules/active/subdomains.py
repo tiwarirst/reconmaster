@@ -1,6 +1,17 @@
 """Subdomain Enumeration Module.
 
-Uses Amass and Subfinder integrations to discover subdomains.
+Uses Subfinder and Amass to discover subdomains.
+
+Fix applied (Flaw 11):
+  requires_tools previously listed BOTH "subfinder" and "amass".
+  check_requirements() in the base class blocks the entire module if ANY
+  listed tool is missing. Amass is a heavy optional dependency — not
+  installed by default on many systems.
+
+  Fix: requires_tools now lists only "subfinder" (the reliable baseline).
+  Amass availability is checked at runtime and used opportunistically.
+  The module runs with whatever tools are available rather than failing
+  because a secondary tool is missing.
 """
 from __future__ import annotations
 
@@ -9,8 +20,8 @@ from typing import Any
 
 from reconai.core.database.models import SubdomainRecord
 from reconai.core.events.types import EventType
-from reconai.integrations.subfinder import SubfinderAdapter
 from reconai.integrations.amass import AmassAdapter
+from reconai.integrations.subfinder import SubfinderAdapter
 from reconai.modules.base import ModuleConfig, ReconModule
 from reconai.modules.registry import register_module
 
@@ -20,13 +31,15 @@ class SubdomainModule(ReconModule):
     config = ModuleConfig(
         name="subdomains_active",
         category="active",
-        description="Active subdomain enumeration using Subfinder and Amass",
-        requires_tools=["subfinder", "amass"],
+        description="Active subdomain enumeration using Subfinder (+ Amass if available)",
+        # Only require subfinder — the baseline tool that is always expected.
+        # Amass is checked at runtime and used opportunistically.
+        requires_tools=["subfinder"],
         supports_timeout=True,
     )
 
     async def run(self, **kwargs: Any) -> Any:
-        domains = kwargs.get("domains", [])
+        domains: list[str] = list(kwargs.get("domains", []))
         if not domains:
             return
 
@@ -35,42 +48,43 @@ class SubdomainModule(ReconModule):
 
         for domain in domains:
             self.logger.module_start(self.config.name, target=domain)
-            
-            subdomains = set()
-            
-            # Run tools concurrently
+
+            subdomains: set[str] = set()
+
+            # ── Build task list from available tools ───────────────────────
+            # Subfinder: already guaranteed available by check_requirements.
+            # Amass: checked here — used if present, silently skipped if not.
             tasks = []
-            if await subfinder.is_available():
-                tasks.append(self._run_subfinder(subfinder, domain))
+            tasks.append(self._run_subfinder(subfinder, domain))
             if await amass.is_available():
                 tasks.append(self._run_amass(amass, domain))
-                
-            if tasks:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for res in results:
-                    if isinstance(res, set):
-                        subdomains.update(res)
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for res in results:
+                if isinstance(res, set):
+                    subdomains.update(res)
 
             for sub in subdomains:
-                # Add to DB
                 record = SubdomainRecord(
                     scan_id=self.scan_id,
                     subdomain=sub,
                     domain=domain,
-                    sources=["active_tools"]
+                    sources=["active_tools"],
                 )
                 self.db.insert_subdomain(record)
-                
-                # Emit event
+
                 await self.events.emit_discovery(
                     event_type=EventType.SUBDOMAIN_DISCOVERED,
                     source=self.config.name,
                     data={"subdomain": sub, "domain": domain, "source": "active_tools"},
                     scan_id=self.scan_id,
-                    target=self.target
+                    target=self.target,
                 )
-                
-            self.logger.info(f"Found {len(subdomains)} unique subdomains via active tools for {domain}", module=self.config.name)
+
+            self.logger.info(
+                f"Found {len(subdomains)} unique subdomains via active tools for {domain}",
+                module=self.config.name,
+            )
             self.logger.module_complete(self.config.name)
 
     async def _run_subfinder(self, adapter: SubfinderAdapter, domain: str) -> set[str]:

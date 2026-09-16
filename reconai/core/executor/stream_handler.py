@@ -5,6 +5,7 @@ Ensures the terminal never appears frozen by displaying output as it arrives.
 from __future__ import annotations
 
 import asyncio
+import io
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -27,7 +28,7 @@ class StreamHandler:
         on_stdout: Callable[[str], None] | None = None,
         on_stderr: Callable[[str], None] | None = None,
         prefix: bool = True,
-    ):
+    ) -> None:
         self._module_name = module_name
         self._output_file = output_file
         self._on_stdout = on_stdout
@@ -35,15 +36,15 @@ class StreamHandler:
         self._prefix = prefix
         self._stdout_lines: list[str] = []
         self._stderr_lines: list[str] = []
-        self._file_handle = None
+        self._file_handle: io.TextIOWrapper | None = None
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "StreamHandler":
         if self._output_file:
             self._output_file.parent.mkdir(parents=True, exist_ok=True)
-            self._file_handle = open(self._output_file, "w")
+            self._file_handle = open(self._output_file, "w", encoding="utf-8")
         return self
 
-    async def __aexit__(self, *args):
+    async def __aexit__(self, *args: object) -> None:
         if self._file_handle:
             self._file_handle.close()
             self._file_handle = None

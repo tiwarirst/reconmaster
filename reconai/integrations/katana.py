@@ -36,7 +36,7 @@ class KatanaAdapter(ToolAdapter):
                         if not line.strip():
                             continue
                         try:
-                            data = json.load(line)
+                            data = json.loads(line)
                             url = data.get("request", {}).get("endpoint") or data.get("url")
                             method = data.get("request", {}).get("method", "GET")
                             status = data.get("response", {}).get("status_code")

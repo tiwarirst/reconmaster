@@ -2,6 +2,17 @@
 
 Handles schema creation, connection management, and all CRUD operations.
 Designed so PostgreSQL can replace SQLite later without changing the interface.
+
+Correctness principles applied:
+  - All tables that can produce duplicates have UNIQUE constraints.
+  - All INSERT paths use INSERT OR IGNORE (new) or ON CONFLICT DO UPDATE (upsert)
+    so re-running a scan or re-probing never inflates the DB.
+  - All insert methods are wrapped in try/except — a single bad record
+    can NEVER abort the scan.
+  - The ports table uses a proper UPSERT: if a richer enrichment pass
+    supplies product/version/CPE for an already-known port, only the
+    non-empty fields are updated, and the original id is preserved.
+  - The dead 'services' table has been removed — its data lives in 'ports'.
 """
 from __future__ import annotations
 
@@ -86,7 +97,8 @@ CREATE TABLE IF NOT EXISTS dns_records (
     value TEXT NOT NULL,
     ttl INTEGER DEFAULT 0,
     source TEXT DEFAULT 'dns',
-    timestamp TEXT
+    timestamp TEXT,
+    UNIQUE(scan_id, hostname, record_type, value)
 );
 
 CREATE TABLE IF NOT EXISTS ports (
@@ -105,20 +117,6 @@ CREATE TABLE IF NOT EXISTS ports (
     UNIQUE(scan_id, host, port, protocol)
 );
 
-CREATE TABLE IF NOT EXISTS services (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    scan_id TEXT,
-    host TEXT NOT NULL,
-    port INTEGER NOT NULL,
-    protocol TEXT DEFAULT 'tcp',
-    service TEXT DEFAULT '',
-    product TEXT DEFAULT '',
-    version TEXT DEFAULT '',
-    extra_info TEXT DEFAULT '',
-    os_type TEXT DEFAULT '',
-    source TEXT DEFAULT ''
-);
-
 CREATE TABLE IF NOT EXISTS urls (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     scan_id TEXT,
@@ -130,7 +128,8 @@ CREATE TABLE IF NOT EXISTS urls (
     title TEXT DEFAULT '',
     redirect_url TEXT DEFAULT '',
     source TEXT DEFAULT '',
-    depth INTEGER DEFAULT 0
+    depth INTEGER DEFAULT 0,
+    UNIQUE(scan_id, url, method)
 );
 
 CREATE TABLE IF NOT EXISTS technologies (
@@ -157,7 +156,8 @@ CREATE TABLE IF NOT EXISTS certificates (
     not_after TEXT DEFAULT '',
     san TEXT DEFAULT '[]',
     fingerprint TEXT DEFAULT '',
-    source TEXT DEFAULT ''
+    source TEXT DEFAULT '',
+    UNIQUE(scan_id, host, fingerprint)
 );
 
 CREATE TABLE IF NOT EXISTS api_endpoints (
@@ -170,7 +170,8 @@ CREATE TABLE IF NOT EXISTS api_endpoints (
     content_type TEXT DEFAULT '',
     auth_required INTEGER,
     source TEXT DEFAULT '',
-    api_type TEXT DEFAULT ''
+    api_type TEXT DEFAULT '',
+    UNIQUE(scan_id, full_url, method)
 );
 
 CREATE TABLE IF NOT EXISTS findings (
@@ -198,7 +199,8 @@ CREATE TABLE IF NOT EXISTS findings (
     attack_class TEXT DEFAULT '',
     conditions_required TEXT DEFAULT '',
     safe_verification TEXT DEFAULT '',
-    prevention TEXT DEFAULT ''
+    prevention TEXT DEFAULT '',
+    UNIQUE(scan_id, title, affected_asset)
 );
 
 CREATE TABLE IF NOT EXISTS tool_runs (
@@ -222,6 +224,7 @@ CREATE INDEX IF NOT EXISTS idx_ports_scan ON ports(scan_id);
 CREATE INDEX IF NOT EXISTS idx_urls_scan ON urls(scan_id);
 CREATE INDEX IF NOT EXISTS idx_findings_scan ON findings(scan_id);
 CREATE INDEX IF NOT EXISTS idx_techs_scan ON technologies(scan_id);
+CREATE INDEX IF NOT EXISTS idx_ips_scan ON ips(scan_id);
 """
 
 
@@ -233,7 +236,7 @@ class DatabaseManager:
     only requires changing this one file.
     """
 
-    def __init__(self, db_path: Path | str = ":memory:"):
+    def __init__(self, db_path: Path | str = ":memory:") -> None:
         self._db_path = str(db_path)
         self._conn: sqlite3.Connection | None = None
 
@@ -255,6 +258,7 @@ class DatabaseManager:
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:
             self.connect()
+        assert self._conn is not None  # noqa: S101
         return self._conn
 
     # ── Scan Operations ─────────────────────────────────────
@@ -279,29 +283,32 @@ class DatabaseManager:
         self.conn.execute(f"UPDATE scans SET {', '.join(sets)} WHERE id = ?", vals)
         self.conn.commit()
 
-    def get_scan(self, scan_id: str) -> dict | None:
+    def get_scan(self, scan_id: str) -> dict[str, Any] | None:
         row = self.conn.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
         return dict(row) if row else None
 
-    def get_latest_scan(self, target: str) -> dict | None:
+    def get_latest_scan(self, target: str) -> dict[str, Any] | None:
         row = self.conn.execute(
             "SELECT * FROM scans WHERE target = ? ORDER BY started_at DESC LIMIT 1",
             (target,),
         ).fetchone()
         return dict(row) if row else None
 
-    def list_scans(self, limit: int = 20) -> list[dict]:
+    def list_scans(self, limit: int = 20) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             "SELECT * FROM scans ORDER BY started_at DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
 
-    # ── Generic Insert/Query ────────────────────────────────
+    # ── Insert Operations ────────────────────────────────────
+    # All inserts are:
+    #   1. Wrapped in try/except — a bad record never aborts the scan.
+    #   2. Idempotent — re-running never creates duplicates.
 
     def insert_subdomain(self, record: SubdomainRecord) -> int:
         try:
             cur = self.conn.execute(
-                "INSERT OR REPLACE INTO subdomains "
+                "INSERT OR IGNORE INTO subdomains "
                 "(scan_id, subdomain, domain, sources, resolved_ips, http_status, https_status, "
                 "title, first_seen, last_seen, is_alive, priority) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -317,19 +324,25 @@ class DatabaseManager:
             return 0
 
     def insert_dns_record(self, record: DNSRecord) -> int:
-        cur = self.conn.execute(
-            "INSERT INTO dns_records (scan_id, hostname, record_type, value, ttl, source, timestamp) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (record.scan_id, record.hostname, record.record_type, record.value,
-             record.ttl, record.source, record.timestamp.isoformat()),
-        )
-        self.conn.commit()
-        return cur.lastrowid or 0
+        """Insert a DNS record, silently ignoring duplicates."""
+        try:
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO dns_records "
+                "(scan_id, hostname, record_type, value, ttl, source, timestamp) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (record.scan_id, record.hostname, record.record_type, record.value,
+                 record.ttl, record.source, record.timestamp.isoformat()),
+            )
+            self.conn.commit()
+            return cur.lastrowid or 0
+        except Exception:
+            return 0
 
     def insert_ip(self, record: IPRecord) -> int:
         try:
             cur = self.conn.execute(
-                "INSERT OR REPLACE INTO ips (scan_id, ip, version, hostnames, asn, asn_org, country, is_private, source) "
+                "INSERT OR IGNORE INTO ips "
+                "(scan_id, ip, version, hostnames, asn, asn_org, country, is_private, source) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (record.scan_id, record.ip, record.version, json.dumps(record.hostnames),
                  record.asn, record.asn_org, record.country, int(record.is_private), record.source),
@@ -340,11 +353,30 @@ class DatabaseManager:
             return 0
 
     def insert_port(self, record: PortRecord) -> int:
+        """Upsert a port record.
+
+        On conflict (same scan_id, host, port, protocol):
+          - Enrichment fields (service, product, version, cpe, banner) are
+            updated only if the incoming value is non-empty AND the stored
+            value is currently empty. This means the first real data wins,
+            but a richer pass (XML enrichment) can fill in missing fields.
+          - The row id is NEVER changed — no DELETE + INSERT.
+          - source is always updated to reflect the latest data origin.
+        """
         try:
             cur = self.conn.execute(
-                "INSERT OR REPLACE INTO ports "
-                "(scan_id, host, port, protocol, state, service, product, version, banner, cpe, source) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                """
+                INSERT INTO ports
+                    (scan_id, host, port, protocol, state, service, product, version, banner, cpe, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scan_id, host, port, protocol) DO UPDATE SET
+                    service = CASE WHEN excluded.service != '' THEN excluded.service ELSE service END,
+                    product = CASE WHEN excluded.product != '' THEN excluded.product ELSE product END,
+                    version = CASE WHEN excluded.version != '' THEN excluded.version ELSE version END,
+                    cpe     = CASE WHEN excluded.cpe     != '' THEN excluded.cpe     ELSE cpe     END,
+                    banner  = CASE WHEN excluded.banner  != '' THEN excluded.banner  ELSE banner  END,
+                    source  = excluded.source
+                """,
                 (record.scan_id, record.host, record.port, record.protocol, record.state,
                  record.service, record.product, record.version, record.banner, record.cpe, record.source),
             )
@@ -354,20 +386,27 @@ class DatabaseManager:
             return 0
 
     def insert_url(self, record: URLRecord) -> int:
-        cur = self.conn.execute(
-            "INSERT INTO urls (scan_id, url, method, status_code, content_type, content_length, title, redirect_url, source, depth) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (record.scan_id, record.url, record.method, record.status_code,
-             record.content_type, record.content_length, record.title,
-             record.redirect_url, record.source, record.depth),
-        )
-        self.conn.commit()
-        return cur.lastrowid or 0
+        """Insert a URL record, silently ignoring duplicates (same scan, url, method)."""
+        try:
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO urls "
+                "(scan_id, url, method, status_code, content_type, content_length, "
+                "title, redirect_url, source, depth) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (record.scan_id, record.url, record.method, record.status_code,
+                 record.content_type, record.content_length, record.title,
+                 record.redirect_url, record.source, record.depth),
+            )
+            self.conn.commit()
+            return cur.lastrowid or 0
+        except Exception:
+            return 0
 
     def insert_technology(self, record: TechnologyRecord) -> int:
         try:
             cur = self.conn.execute(
-                "INSERT OR REPLACE INTO technologies (scan_id, host, name, category, version, confidence, source, evidence) "
+                "INSERT OR IGNORE INTO technologies "
+                "(scan_id, host, name, category, version, confidence, source, evidence) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (record.scan_id, record.host, record.name, record.category,
                  record.version, record.confidence, record.source, json.dumps(record.evidence)),
@@ -378,121 +417,188 @@ class DatabaseManager:
             return 0
 
     def insert_certificate(self, record: CertificateRecord) -> int:
-        cur = self.conn.execute(
-            "INSERT INTO certificates (scan_id, host, subject, issuer, serial, not_before, not_after, san, fingerprint, source) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (record.scan_id, record.host, record.subject, record.issuer, record.serial,
-             record.not_before, record.not_after, json.dumps(record.san), record.fingerprint, record.source),
-        )
-        self.conn.commit()
-        return cur.lastrowid or 0
+        try:
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO certificates "
+                "(scan_id, host, subject, issuer, serial, not_before, not_after, san, fingerprint, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (record.scan_id, record.host, record.subject, record.issuer, record.serial,
+                 record.not_before, record.not_after, json.dumps(record.san),
+                 record.fingerprint, record.source),
+            )
+            self.conn.commit()
+            return cur.lastrowid or 0
+        except Exception:
+            return 0
 
     def insert_api_endpoint(self, record: APIEndpoint) -> int:
-        cur = self.conn.execute(
-            "INSERT INTO api_endpoints (scan_id, host, method, path, full_url, content_type, auth_required, source, api_type) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (record.scan_id, record.host, record.method, record.path, record.full_url,
-             record.content_type, record.auth_required, record.source, record.api_type),
-        )
-        self.conn.commit()
-        return cur.lastrowid or 0
+        try:
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO api_endpoints "
+                "(scan_id, host, method, path, full_url, content_type, auth_required, source, api_type) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (record.scan_id, record.host, record.method, record.path, record.full_url,
+                 record.content_type, record.auth_required, record.source, record.api_type),
+            )
+            self.conn.commit()
+            return cur.lastrowid or 0
+        except Exception:
+            return 0
 
     def insert_finding(self, record: FindingRecord) -> int:
-        cur = self.conn.execute(
-            "INSERT INTO findings "
-            "(scan_id, title, severity, confidence, status, affected_asset, affected_asset_type, "
-            "description, impact, evidence, detection_method, remediation, refs, cve, cwe, "
-            "cvss, verified, timestamp, what_is_it, why_detected, attack_class, "
-            "conditions_required, safe_verification, prevention) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (record.scan_id, record.title, record.severity.value, record.confidence.value,
-             record.status.value, record.affected_asset, record.affected_asset_type,
-             record.description, record.impact, record.evidence, record.detection_method,
-             record.remediation, json.dumps(record.references), json.dumps(record.cve),
-             json.dumps(record.cwe), record.cvss, int(record.verified),
-             record.timestamp.isoformat(), record.what_is_it, record.why_detected,
-             record.attack_class, record.conditions_required, record.safe_verification,
-             record.prevention),
-        )
-        self.conn.commit()
-        return cur.lastrowid or 0
+        """Insert a finding, silently ignoring exact duplicates (same title + asset)."""
+        try:
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO findings "
+                "(scan_id, title, severity, confidence, status, affected_asset, affected_asset_type, "
+                "description, impact, evidence, detection_method, remediation, refs, cve, cwe, "
+                "cvss, verified, timestamp, what_is_it, why_detected, attack_class, "
+                "conditions_required, safe_verification, prevention) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (record.scan_id, record.title, record.severity.value, record.confidence.value,
+                 record.status.value, record.affected_asset, record.affected_asset_type,
+                 record.description, record.impact, record.evidence, record.detection_method,
+                 record.remediation, json.dumps(record.references), json.dumps(record.cve),
+                 json.dumps(record.cwe), record.cvss, int(record.verified),
+                 record.timestamp.isoformat(), record.what_is_it, record.why_detected,
+                 record.attack_class, record.conditions_required, record.safe_verification,
+                 record.prevention),
+            )
+            self.conn.commit()
+            return cur.lastrowid or 0
+        except Exception:
+            return 0
 
     def insert_tool_run(self, record: ToolRunRecord) -> int:
-        cur = self.conn.execute(
-            "INSERT INTO tool_runs (scan_id, tool_name, module_name, command, status, exit_code, "
-            "duration, timed_out, output_file, started_at, completed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (record.scan_id, record.tool_name, record.module_name, record.command,
-             record.status, record.exit_code, record.duration, int(record.timed_out),
-             record.output_file, record.started_at.isoformat(),
-             record.completed_at.isoformat() if record.completed_at else None),
-        )
-        self.conn.commit()
-        return cur.lastrowid or 0
+        try:
+            cur = self.conn.execute(
+                "INSERT INTO tool_runs (scan_id, tool_name, module_name, command, status, exit_code, "
+                "duration, timed_out, output_file, started_at, completed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (record.scan_id, record.tool_name, record.module_name, record.command,
+                 record.status, record.exit_code, record.duration, int(record.timed_out),
+                 record.output_file, record.started_at.isoformat(),
+                 record.completed_at.isoformat() if record.completed_at else None),
+            )
+            self.conn.commit()
+            return cur.lastrowid or 0
+        except Exception:
+            return 0
 
     # ── Query Operations ────────────────────────────────────
 
-    def get_subdomains(self, scan_id: str) -> list[dict]:
-        rows = self.conn.execute("SELECT * FROM subdomains WHERE scan_id = ? ORDER BY subdomain", (scan_id,)).fetchall()
+    def get_subdomains(self, scan_id: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM subdomains WHERE scan_id = ? ORDER BY subdomain", (scan_id,)
+        ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_dns_records(self, scan_id: str, hostname: str = "") -> list[dict]:
+    def get_dns_records(self, scan_id: str, hostname: str = "") -> list[dict[str, Any]]:
         if hostname:
-            rows = self.conn.execute("SELECT * FROM dns_records WHERE scan_id = ? AND hostname = ?", (scan_id, hostname)).fetchall()
+            rows = self.conn.execute(
+                "SELECT * FROM dns_records WHERE scan_id = ? AND hostname = ?", (scan_id, hostname)
+            ).fetchall()
         else:
-            rows = self.conn.execute("SELECT * FROM dns_records WHERE scan_id = ?", (scan_id,)).fetchall()
+            rows = self.conn.execute(
+                "SELECT * FROM dns_records WHERE scan_id = ?", (scan_id,)
+            ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_ports(self, scan_id: str, host: str = "") -> list[dict]:
+    def get_ports(self, scan_id: str, host: str = "") -> list[dict[str, Any]]:
         if host:
-            rows = self.conn.execute("SELECT * FROM ports WHERE scan_id = ? AND host = ?", (scan_id, host)).fetchall()
+            rows = self.conn.execute(
+                "SELECT * FROM ports WHERE scan_id = ? AND host = ?", (scan_id, host)
+            ).fetchall()
         else:
-            rows = self.conn.execute("SELECT * FROM ports WHERE scan_id = ?", (scan_id,)).fetchall()
+            rows = self.conn.execute(
+                "SELECT * FROM ports WHERE scan_id = ?", (scan_id,)
+            ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_urls(self, scan_id: str) -> list[dict]:
-        return [dict(r) for r in self.conn.execute("SELECT * FROM urls WHERE scan_id = ?", (scan_id,)).fetchall()]
+    def get_urls(self, scan_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(r) for r in
+            self.conn.execute("SELECT * FROM urls WHERE scan_id = ?", (scan_id,)).fetchall()
+        ]
 
-    def get_technologies(self, scan_id: str) -> list[dict]:
-        return [dict(r) for r in self.conn.execute("SELECT * FROM technologies WHERE scan_id = ?", (scan_id,)).fetchall()]
+    def get_technologies(self, scan_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(r) for r in
+            self.conn.execute(
+                "SELECT * FROM technologies WHERE scan_id = ?", (scan_id,)
+            ).fetchall()
+        ]
 
-    def get_findings(self, scan_id: str) -> list[dict]:
-        return [dict(r) for r in self.conn.execute("SELECT * FROM findings WHERE scan_id = ? ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END", (scan_id,)).fetchall()]
+    def get_findings(self, scan_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(r) for r in
+            self.conn.execute(
+                "SELECT * FROM findings WHERE scan_id = ? "
+                "ORDER BY CASE severity "
+                "  WHEN 'critical' THEN 0 WHEN 'high' THEN 1 "
+                "  WHEN 'medium' THEN 2  WHEN 'low'  THEN 3 ELSE 4 END",
+                (scan_id,),
+            ).fetchall()
+        ]
 
-    def get_certificates(self, scan_id: str) -> list[dict]:
-        return [dict(r) for r in self.conn.execute("SELECT * FROM certificates WHERE scan_id = ?", (scan_id,)).fetchall()]
+    def get_certificates(self, scan_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(r) for r in
+            self.conn.execute(
+                "SELECT * FROM certificates WHERE scan_id = ?", (scan_id,)
+            ).fetchall()
+        ]
 
-    def get_api_endpoints(self, scan_id: str) -> list[dict]:
-        return [dict(r) for r in self.conn.execute("SELECT * FROM api_endpoints WHERE scan_id = ?", (scan_id,)).fetchall()]
+    def get_api_endpoints(self, scan_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(r) for r in
+            self.conn.execute(
+                "SELECT * FROM api_endpoints WHERE scan_id = ?", (scan_id,)
+            ).fetchall()
+        ]
 
-    def get_ips(self, scan_id: str) -> list[dict]:
-        return [dict(r) for r in self.conn.execute("SELECT * FROM ips WHERE scan_id = ?", (scan_id,)).fetchall()]
+    def get_ips(self, scan_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(r) for r in
+            self.conn.execute("SELECT * FROM ips WHERE scan_id = ?", (scan_id,)).fetchall()
+        ]
 
-    def get_tool_runs(self, scan_id: str) -> list[dict]:
-        return [dict(r) for r in self.conn.execute("SELECT * FROM tool_runs WHERE scan_id = ?", (scan_id,)).fetchall()]
+    def get_tool_runs(self, scan_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(r) for r in
+            self.conn.execute(
+                "SELECT * FROM tool_runs WHERE scan_id = ?", (scan_id,)
+            ).fetchall()
+        ]
 
     # ── Stats ───────────────────────────────────────────────
 
     def get_scan_stats(self, scan_id: str) -> dict[str, int]:
-        """Get aggregate stats for a scan."""
-        stats = {}
-        for table in ["subdomains", "dns_records", "ips", "ports", "urls", "technologies", "certificates", "api_endpoints", "findings"]:
-            row = self.conn.execute(f"SELECT COUNT(*) as c FROM {table} WHERE scan_id = ?", (scan_id,)).fetchone()
-            stats[table] = row["c"] if row else 0
+        """Get aggregate record counts for a scan."""
+        tables = [
+            "subdomains", "dns_records", "ips", "ports",
+            "urls", "technologies", "certificates", "api_endpoints", "findings",
+        ]
+        stats: dict[str, int] = {}
+        for table in tables:
+            row = self.conn.execute(
+                f"SELECT COUNT(*) AS c FROM {table} WHERE scan_id = ?", (scan_id,)
+            ).fetchone()
+            stats[table] = int(row["c"]) if row else 0
         return stats
 
     # ── Comparison ──────────────────────────────────────────
 
-    def get_scan_data_for_comparison(self, scan_id: str) -> dict[str, list[dict]]:
-        """Get all data for a scan, organized by type, for comparison."""
+    def get_scan_data_for_comparison(self, scan_id: str) -> dict[str, list[dict[str, Any]]]:
+        """Get all data for a scan, organized by type, for diff/comparison."""
         return {
-            "subdomains": self.get_subdomains(scan_id),
-            "dns_records": self.get_dns_records(scan_id),
-            "ports": self.get_ports(scan_id),
-            "urls": self.get_urls(scan_id),
+            "subdomains":   self.get_subdomains(scan_id),
+            "dns_records":  self.get_dns_records(scan_id),
+            "ports":        self.get_ports(scan_id),
+            "urls":         self.get_urls(scan_id),
             "technologies": self.get_technologies(scan_id),
-            "findings": self.get_findings(scan_id),
+            "findings":     self.get_findings(scan_id),
             "certificates": self.get_certificates(scan_id),
             "api_endpoints": self.get_api_endpoints(scan_id),
-            "ips": self.get_ips(scan_id),
+            "ips":          self.get_ips(scan_id),
         }

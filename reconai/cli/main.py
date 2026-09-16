@@ -97,7 +97,7 @@ def scan(ctx: click.Context, target: str, mode: str, profile: str, timeout: int 
     scope = ScopeManager.for_target(target)
     orchestrator = Orchestrator(target, config_mgr, scope, console)
     
-    async def _run():
+    async def _run() -> None:
         await orchestrator.prepare_scan(mode=mode, profile=profile)
         await orchestrator.run()
         
@@ -259,6 +259,60 @@ def compare(ctx: click.Context, old_scan_id: str, new_scan_id: str) -> None:
 
     if old_subs == new_subs and old_ports == new_ports:
         console.success("No changes detected in subdomains or ports.")
+
+
+@cli.command()
+@click.argument("scan_id")
+@click.argument("finding_title")
+@click.pass_context
+def exploit(ctx: click.Context, scan_id: str, finding_title: str) -> None:
+    """Generate a Proof of Concept (PoC) exploit for a finding."""
+    console: ReconConsole = ctx.obj["console"]
+    config_mgr: ConfigManager = ctx.obj["config_mgr"]
+    
+    base_out = Path(config_mgr.config.output.base_dir)
+    scan_dir = None
+    for path in base_out.rglob(scan_id):
+        if path.is_dir():
+            scan_dir = path
+            break
+            
+    if not scan_dir:
+        console.error(f"Scan ID {scan_id} not found.")
+        sys.exit(1)
+        
+    from reconai.core.database.manager import DatabaseManager
+    db = DatabaseManager(db_path=scan_dir / "reconai.db")
+    findings = db.get_findings(scan_id)
+    
+    # Simple search
+    target_finding = None
+    for f in findings:
+        if finding_title.lower() in f["title"].lower():
+            target_finding = f
+            break
+            
+    if not target_finding:
+        console.error(f"Finding matching '{finding_title}' not found in scan {scan_id}.")
+        sys.exit(1)
+        
+    from reconai.ai.local import OllamaAdapter
+    from reconai.ai.analyzer import Analyzer
+    llm = OllamaAdapter()
+    
+    async def _run() -> None:
+        if not await llm.is_available():
+            console.error("Local LLM (Ollama) is not available. Please install and run it.")
+            sys.exit(1)
+            
+        analyzer = Analyzer(llm, db, scan_id)
+        console.info(f"Generating PoC exploit and analysis for: {target_finding['title']}...")
+        result = await analyzer.generate_exploit_poc(target_finding)
+        
+        console.banner()
+        console.console.print(f"[bold red]Exploit Analysis & PoC:[/bold red]\n\n{result}")
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

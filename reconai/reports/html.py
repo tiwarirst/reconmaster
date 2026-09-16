@@ -3,6 +3,10 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from reconai.core.database.manager import DatabaseManager
 
 
 _HTML_TEMPLATE = """<!DOCTYPE html>
@@ -83,7 +87,7 @@ def _sev_class(severity: str) -> str:
     return f"sev-{severity.lower()}"
 
 
-def generate_html_report(db, scan_id: str, out_dir: Path) -> Path:
+def generate_html_report(db: "DatabaseManager", scan_id: str, out_dir: Path) -> Path:
     """Generate a full HTML report from scan data."""
     from reconai.reports.scoring import RiskScoringEngine
 

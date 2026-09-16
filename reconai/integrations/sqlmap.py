@@ -1,17 +1,48 @@
-"""SQLMap adapter."""
+"""SQLMap adapter — stateless, correct detection logic.
+
+Fixes applied:
+  BUG 1 / BUG 6: Removed self.tmp_out — the temp CSV file was created but
+    never read (parse() reads stdout) and never deleted, leaking disk space
+    on every scan. Removed entirely.
+  BUG 2: Fixed operator precedence bug in vulnerability detection.
+    Original code: A or B and C  →  evaluated as  A or (B and C)
+    SQLMap's real detection output uses "injectable" not "sql injection",
+    so both branches were wrong. Replaced with a proper regex that matches
+    SQLMap's actual stdout patterns.
+"""
 from __future__ import annotations
 
-import tempfile
+import re
 from pathlib import Path
 from typing import Any
-import csv
 
 from reconai.core.database.models import FindingRecord, FindingStatus, Severity, Confidence
 from reconai.core.executor.result import CommandResult
 from reconai.integrations.base import ToolAdapter
 
 
+# Matches SQLMap's actual confirmation lines, e.g.:
+#   "Parameter: id (GET) appears to be 'Boolean-based blind' injectable"
+#   "sqlmap identified the following injection point(s)"
+#   "Type: time-based blind"
+_VULN_PATTERNS = re.compile(
+    r"appears to be .{1,60} injectable"
+    r"|sqlmap identified the following injection"
+    r"|Type:\s+\w[\w\s\-]+blind"
+    r"|Type:\s+Union query"
+    r"|Type:\s+Error based",
+    re.IGNORECASE,
+)
+_PAYLOAD_PATTERN = re.compile(r"Payload:\s+(.+)")
+
+
 class SqlmapAdapter(ToolAdapter):
+    """Stateless SQLMap adapter.
+
+    build_command() has no side effects on self.
+    parse() derives all output from the CommandResult's stdout.
+    """
+
     name = "sqlmap"
 
     async def is_available(self) -> bool:
@@ -19,47 +50,62 @@ class SqlmapAdapter(ToolAdapter):
         return avail
 
     def build_command(self, **kwargs: Any) -> list[str]:
-        target = kwargs.get("target", "")
-        self.tmp_out = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
-        self.tmp_out.close()
-        
-        # Batch mode, minimal output, output to CSV
+        """Build a SQLMap command.
+
+        Args:
+            target: URL to test (must include at least one parameter).
+        """
+        target: str = kwargs.get("target", "")
         return [
-            "sqlmap", "-u", target, 
-            "--batch", "--quiet", "--level=1", "--risk=1",
-            f"--output-dir={self.tmp_out.name}_dir", # SQLmap creates a structure
-            "--dump-format=CSV"
+            "sqlmap",
+            "-u", target,
+            "--batch",          # Never prompt for user input
+            "--quiet",
+            "--level=1",
+            "--risk=1",
+            "--flush-session",  # Avoid stale session data from previous runs
         ]
 
     def parse(self, result: CommandResult, target_url: str = "") -> list[FindingRecord]:
-        findings = []
-        # SQLMap typically outputs if it is vulnerable to stdout or specific files.
-        # Since parsing SQLMap output perfectly via stdout is hard, we look for standard success strings.
+        """Parse SQLMap stdout for confirmed vulnerabilities.
+
+        SQLMap writes its detection status to stdout. We match on its real
+        output patterns rather than naive substring checks.
+        """
+        findings: list[FindingRecord] = []
         if not result.has_output:
             return findings
-            
+
         vulnerable = False
-        payloads = []
+        payloads: list[str] = []
+
         for line in result.output_lines:
-            if "is vulnerable" in line.lower() or "sql injection" in line.lower() and "appears to be" in line.lower():
+            if _VULN_PATTERNS.search(line):
                 vulnerable = True
-            if "Payload:" in line:
-                payloads.append(line.split("Payload:")[1].strip())
-                
+            m = _PAYLOAD_PATTERN.search(line)
+            if m:
+                payloads.append(m.group(1).strip())
+
         if vulnerable:
-            findings.append(FindingRecord(
-                scan_id="",
-                title="SQL Injection Vulnerability",
-                severity=Severity.CRITICAL,
-                confidence=Confidence.VERIFIED,
-                status=FindingStatus.VERIFIED,
-                affected_asset=target_url,
-                affected_asset_type="URL",
-                description="SQLMap confirmed a SQL injection vulnerability.",
-                impact="An attacker can read, modify, or delete database information, and potentially achieve RCE.",
-                evidence=f"Payload used: {payloads[0] if payloads else 'Unknown'}",
-                remediation="Use prepared statements or parameterized queries.",
-                detection_method="SQLMap automated scanning"
-            ))
-                
+            evidence = f"Payload: {payloads[0]}" if payloads else "Vulnerability confirmed by SQLMap"
+            findings.append(
+                FindingRecord(
+                    scan_id="",  # Set by module
+                    title="SQL Injection Vulnerability",
+                    severity=Severity.CRITICAL,
+                    confidence=Confidence.VERIFIED,
+                    status=FindingStatus.VERIFIED,
+                    affected_asset=target_url,
+                    affected_asset_type="URL",
+                    description="SQLMap confirmed a SQL injection vulnerability.",
+                    impact=(
+                        "An attacker can read, modify, or delete database contents "
+                        "and potentially achieve remote code execution."
+                    ),
+                    evidence=evidence,
+                    remediation="Use prepared statements or parameterized queries for all database interactions.",
+                    detection_method="SQLMap automated scanning",
+                )
+            )
+
         return findings

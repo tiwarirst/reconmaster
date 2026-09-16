@@ -24,18 +24,19 @@ class ScreenshotModule(ReconModule):
 
     async def run(self, **kwargs: Any) -> Any:
         self.logger.module_start(self.config.name)
-        
-        # Get all live URLs (200 OK)
+
+        # Get all live URLs (200 OK, 401, 403)
         urls = self.db.get_urls(self.scan_id)
         live_urls = [u["url"] for u in urls if u["status_code"] in (200, 401, 403)]
-        
+
         if not live_urls:
             self.logger.info("No live URLs found to screenshot.")
             self.logger.module_complete(self.config.name)
             return
 
-        adapter = GowitnessAdapter()
-        if not await adapter.is_installed():
+        # ── Instantiate adapter with the module's runner (required by ToolAdapter) ──
+        adapter = GowitnessAdapter(runner=self.runner)
+        if not await adapter.is_available():
             self.logger.warning(f"{adapter.name} is not installed. Skipping screenshots.")
             self.logger.module_complete(self.config.name)
             return
@@ -50,18 +51,18 @@ class ScreenshotModule(ReconModule):
             cmd = adapter.build_command(
                 urls_file=urls_file,
                 out_dir=self.out_dir,
-                timeout=self.timeout
+                timeout=self.timeout,
             )
-            
+
             self.logger.info(f"Taking screenshots of {len(live_urls)} URLs...")
-            result = await self.executor.run_command(cmd, timeout=self.timeout * len(live_urls))
-            
-            # Gowitness doesn't produce JSON output for our DB, it just drops .png files in the folder.
+            await self.runner.run(command=cmd, timeout=self.timeout * len(live_urls))
+
+            # Gowitness doesn't produce JSON for our DB — images are saved to the folder
             screenshot_dir = self.out_dir / "screenshots"
             if screenshot_dir.exists():
                 count = len(list(screenshot_dir.glob("*.png")))
-                self.logger.success(f"Successfully captured {count} screenshots. Saved in: {screenshot_dir}")
-                
+                self.logger.info(f"Captured {count} screenshots → {screenshot_dir}")
+
         finally:
             Path(urls_file).unlink(missing_ok=True)
 

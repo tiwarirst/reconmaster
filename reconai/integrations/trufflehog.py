@@ -30,7 +30,7 @@ class TrufflehogAdapter(ToolAdapter):
         return ["trufflehog", "filesystem", path, "--json"]
 
     def parse(self, result: CommandResult) -> list[FindingRecord]:
-        findings = []
+        findings: list[FindingRecord] = []
         if not result.has_output:
             return findings
             
@@ -38,7 +38,7 @@ class TrufflehogAdapter(ToolAdapter):
             if not line.strip():
                 continue
             try:
-                data = json.load(line)
+                data = json.loads(line)
                 detector_name = data.get("DetectorName", "Unknown Secret")
                 raw = data.get("Raw", "")
                 file_path = data.get("SourceMetadata", {}).get("Data", {}).get("Filesystem", {}).get("file", "")

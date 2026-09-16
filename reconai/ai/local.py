@@ -32,7 +32,8 @@ class OllamaAdapter(AIAdapter):
                     json={"model": self.model, "prompt": prompt, "stream": False}
                 )
                 if resp.status_code == 200:
-                    return resp.json().get("response", "")
+                    result: dict[str, str] = resp.json()
+                    return result.get("response", "")
         except Exception:
             pass
         return ""

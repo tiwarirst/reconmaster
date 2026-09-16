@@ -1,11 +1,18 @@
 """Advanced Directory Fuzzing Module.
 
 Uses FFuF for ultra-fast directory discovery.
+
+Fix applied (BUG 1):
+  Temp file is now owned by the module, not the adapter.
+  Concurrent _fuzz_url() calls each get an independent output file.
+  Added return_exceptions=True to asyncio.gather.
 """
 from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from reconai.core.events.types import EventType
@@ -25,20 +32,22 @@ class FfufModule(ReconModule):
     )
 
     async def run(self, **kwargs: Any) -> Any:
-        urls = kwargs.get("urls", [])
+        urls: list[str] = list(kwargs.get("urls", []))
         if not urls:
             url_records = self.db.get_urls(self.scan_id)
-            urls = [r["url"] for r in url_records if r["status_code"] == 200 and r["depth"] == 0]
+            urls = [
+                r["url"] for r in url_records
+                if r.get("status_code") == 200 and r.get("depth", 0) == 0
+            ]
 
         if not urls:
             return
 
         adapter = FfufAdapter(self.runner)
         if not await adapter.is_available():
-            self.logger.error("ffuf not available. Skipping advanced directory fuzzing.", module=self.config.name)
+            self.logger.error("ffuf not available. Skipping directory fuzzing.", module=self.config.name)
             return
-            
-        # Common wordlist on Kali
+
         wordlist = "/usr/share/wordlists/dirb/common.txt"
         if not os.path.exists(wordlist):
             self.logger.error(f"Wordlist {wordlist} not found. Skipping ffuf.", module=self.config.name)
@@ -48,29 +57,51 @@ class FfufModule(ReconModule):
 
         semaphore = asyncio.Semaphore(3)
         tasks = [self._fuzz_url(adapter, semaphore, url, wordlist) for url in urls]
-        await asyncio.gather(*tasks)
+        await asyncio.gather(*tasks, return_exceptions=True)
 
         self.logger.module_complete(self.config.name)
 
-    async def _fuzz_url(self, adapter: FfufAdapter, semaphore: asyncio.Semaphore, url: str, wordlist: str) -> None:
+    async def _fuzz_url(
+        self,
+        adapter: FfufAdapter,
+        semaphore: asyncio.Semaphore,
+        url: str,
+        wordlist: str,
+    ) -> None:
+        """Fuzz a single URL for directories.
+
+        Temp file lifecycle:
+          1. Created here, before build_command.
+          2. Path passed to adapter — adapter instructs FFuF to write there.
+          3. Path passed to parse_output_file after process exits.
+          4. Always deleted in finally.
+        """
         async with semaphore:
+            tmp_path: Path | None = None
             try:
-                cmd = adapter.build_command(target=url, wordlist=wordlist)
-                result = await self.runner.run(command=cmd, timeout=300)
-                
-                url_records = adapter.parse(result)
-                
+                with tempfile.NamedTemporaryFile(
+                    suffix=".json", delete=False, prefix="ffuf_"
+                ) as tmp:
+                    tmp_path = Path(tmp.name)
+
+                cmd = adapter.build_command(target=url, wordlist=wordlist, output_file=tmp_path)
+                await self.runner.run(command=cmd, timeout=300)
+
+                url_records = adapter.parse_output_file(tmp_path)
                 for record in url_records:
                     record.scan_id = self.scan_id
                     self.db.insert_url(record)
-                    
+
                     await self.events.emit_discovery(
                         event_type=EventType.URL_DISCOVERED,
                         source=self.config.name,
                         data={"url": record.url, "status": record.status_code},
                         scan_id=self.scan_id,
-                        target=self.target
+                        target=self.target,
                     )
-                        
-            except Exception as e:
-                self.logger.debug(f"FFuF fuzzing failed for {url}: {e}")
+
+            except Exception as exc:
+                self.logger.debug(f"FFuF fuzzing failed for {url}: {exc}", module=self.config.name)
+            finally:
+                if tmp_path and tmp_path.exists():
+                    tmp_path.unlink(missing_ok=True)

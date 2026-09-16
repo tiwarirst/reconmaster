@@ -5,7 +5,7 @@ Analyzes HTTP responses for missing or misconfigured security headers.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 
@@ -23,7 +23,7 @@ class SecurityHeadersModule(ReconModule):
         supports_timeout=True,
     )
 
-    REQUIRED_HEADERS = {
+    REQUIRED_HEADERS: ClassVar[dict[str, dict[str, Any]]] = {
         "Strict-Transport-Security": {
             "severity": Severity.LOW,
             "description": "Enforces secure (HTTP over SSL/TLS) connections to the server.",
@@ -43,7 +43,7 @@ class SecurityHeadersModule(ReconModule):
             "severity": Severity.LOW,
             "description": "Provides clickjacking protection.",
             "impact": "Application may be vulnerable to Clickjacking.",
-        }
+        },
     }
 
     async def run(self, **kwargs: Any) -> Any:
@@ -70,10 +70,11 @@ class SecurityHeadersModule(ReconModule):
             
             for header, info in self.REQUIRED_HEADERS.items():
                 if header.lower() not in headers:
+                    severity: Severity = info["severity"]  # already a Severity enum
                     finding = FindingRecord(
                         scan_id=self.scan_id,
                         title=f"Missing Security Header: {header}",
-                        severity=info["severity"],
+                        severity=severity,
                         confidence=Confidence.VERIFIED,
                         status=FindingStatus.VERIFIED,
                         affected_asset=url,

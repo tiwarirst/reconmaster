@@ -8,16 +8,16 @@ from reconai.core.database.manager import DatabaseManager
 
 
 class ChangeDetector:
-    def __init__(self, db: DatabaseManager):
+    def __init__(self, db: DatabaseManager) -> None:
         self.db = db
 
-    def compare(self, old_scan_id: str, new_scan_id: str) -> dict:
+    def compare(self, old_scan_id: str, new_scan_id: str) -> dict[str, list[str]]:
         """Compare two scans and return the differences."""
         
         old_data = self.db.get_scan_data_for_comparison(old_scan_id)
         new_data = self.db.get_scan_data_for_comparison(new_scan_id)
         
-        diff = {
+        diff: dict[str, list[str]] = {
             "new_subdomains": [],
             "removed_subdomains": [],
             "new_ports": [],

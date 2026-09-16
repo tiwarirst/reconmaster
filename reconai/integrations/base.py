@@ -16,7 +16,7 @@ class ToolAdapter(ABC):
 
     name: str
 
-    def __init__(self, runner: CommandRunner):
+    def __init__(self, runner: CommandRunner) -> None:
         self.runner = runner
 
     @abstractmethod

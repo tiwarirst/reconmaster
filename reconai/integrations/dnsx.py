@@ -36,7 +36,7 @@ class DnsxAdapter(ToolAdapter):
                         if not line.strip():
                             continue
                         try:
-                            data = json.load(line)
+                            data = json.loads(line)
                             host = data.get("host")
                             a_records = data.get("a", [])
                             
