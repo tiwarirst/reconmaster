@@ -1,8 +1,11 @@
-"""DNSx adapter."""
+"""DNSx adapter — stateless, concurrent-safe.
+
+Fix: Removed self.tmp_out (same race condition as other adapters).
+The module creates and owns the output file path, passing it via kwargs.
+"""
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +15,13 @@ from reconai.integrations.base import ToolAdapter
 
 
 class DnsxAdapter(ToolAdapter):
+    """Stateless DNSx adapter.
+
+    Concurrency contract:
+      - build_command() does NOT mutate self.
+      - parse_output_file() is a pure function of the given path.
+    """
+
     name = "dnsx"
 
     async def is_available(self) -> bool:
@@ -19,42 +29,59 @@ class DnsxAdapter(ToolAdapter):
         return avail
 
     def build_command(self, **kwargs: Any) -> list[str]:
-        domain_file = kwargs.get("domain_file", "")
-        self.tmp_out = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
-        self.tmp_out.close()
-        
-        # DNSx resolve, wildcard filtering, JSON output
-        return ["dnsx", "-l", domain_file, "-j", "-o", self.tmp_out.name, "-silent", "-a", "-aaaa", "-cname"]
+        """Build a DNSx command.
 
-    def parse(self, result: CommandResult) -> list[DNSRecord]:
-        records = []
+        Args:
+            domain_file: Path to file containing one domain per line.
+            output_file: Path where DNSx writes JSON output.
+                         Created and owned by the calling module.
+        """
+        domain_file: str = kwargs.get("domain_file", "")
+        output_file: Path | str = kwargs.get("output_file", "")
+
+        cmd = ["dnsx", "-l", domain_file, "-j", "-silent", "-a", "-aaaa", "-cname"]
+        if output_file:
+            cmd.extend(["-o", str(output_file)])
+        return cmd
+
+    def parse_output_file(self, path: Path) -> list[DNSRecord]:
+        """Parse DNSx JSONL output. Each line is an independent JSON record."""
+        records: list[DNSRecord] = []
         try:
-            path = Path(self.tmp_out.name)
-            if path.exists() and path.stat().st_size > 0:
-                with open(path, "r") as f:
-                    for line in f:
-                        if not line.strip():
-                            continue
-                        try:
-                            data = json.loads(line)
-                            host = data.get("host")
-                            a_records = data.get("a", [])
-                            
-                            for a in a_records:
-                                records.append(DNSRecord(
-                                    scan_id="",
-                                    hostname=host,
-                                    record_type="A",
-                                    value=a,
-                                    source="dnsx"
-                                ))
-                        except json.JSONDecodeError:
-                            pass
+            if not path.exists() or path.stat().st_size == 0:
+                return records
+
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                for raw_line in fh:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data: dict[str, Any] = json.loads(line)
+                        host: str = data.get("host", "")
+
+                        for a_rec in data.get("a", []):
+                            records.append(DNSRecord(
+                                scan_id="", hostname=host, record_type="A",
+                                value=str(a_rec), source="dnsx",
+                            ))
+                        for aaaa_rec in data.get("aaaa", []):
+                            records.append(DNSRecord(
+                                scan_id="", hostname=host, record_type="AAAA",
+                                value=str(aaaa_rec), source="dnsx",
+                            ))
+                        for cname_rec in data.get("cname", []):
+                            records.append(DNSRecord(
+                                scan_id="", hostname=host, record_type="CNAME",
+                                value=str(cname_rec), source="dnsx",
+                            ))
+                    except json.JSONDecodeError:
+                        continue
         except Exception:
             pass
-        finally:
-            path = Path(self.tmp_out.name)
-            if hasattr(self, 'tmp_out') and path.exists():
-                path.unlink(missing_ok=True)
-                
+
         return records
+
+    def parse(self, result: CommandResult) -> list[Any]:
+        """Required by ToolAdapter base class — not used for DNSx."""
+        return []

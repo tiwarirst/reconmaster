@@ -1,13 +1,29 @@
 """High-Speed DNS Resolution Module.
 
-Uses DNSx for extremely fast domain resolution and wildcard filtering.
+Uses DNSx for fast domain resolution and wildcard filtering.
+
+Fixes applied:
+  BUG 3: DNSx-resolved IPs are now inserted into the `ips` table.
+    Previously, A/AAAA records were emitted as HOST_RESOLVED events but
+    never persisted to the ips table. PortScanModule reads from
+    db.get_ips() — so these IPs were invisible to the port scanner.
+
+  BUG 10: Fixed NameError in finally block.
+    Previously, `domain_file` was assigned inside `with NamedTemporaryFile()`
+    and referenced in the `finally` block. If NamedTemporaryFile raised,
+    domain_file was never set, causing NameError in finally which masked
+    the real exception. Fixed by pre-initializing domain_file = None.
+
+  Adapter: Updated to use new stateless DnsxAdapter.parse_output_file(path).
 """
 from __future__ import annotations
 
-import os
+import ipaddress
 import tempfile
+from pathlib import Path
 from typing import Any
 
+from reconai.core.database.models import IPRecord
 from reconai.core.events.types import EventType
 from reconai.integrations.dnsx import DnsxAdapter
 from reconai.modules.base import ModuleConfig, ReconModule
@@ -26,44 +42,102 @@ class DnsxModule(ReconModule):
 
     async def run(self, **kwargs: Any) -> Any:
         subs = self.db.get_subdomains(self.scan_id)
-        subdomains = [s["subdomain"] for s in subs]
-        
+        subdomains: list[str] = [str(s["subdomain"]) for s in subs]
+
         if not subdomains:
             return
 
         adapter = DnsxAdapter(self.runner)
         if not await adapter.is_available():
-            self.logger.error("dnsx not available. Skipping high-speed DNS resolution.", module=self.config.name)
+            self.logger.error(
+                "dnsx not available. Skipping high-speed DNS resolution.",
+                module=self.config.name,
+            )
             return
 
         self.logger.module_start(self.config.name, target=f"{len(subdomains)} subdomains")
 
-        # Write subdomains to temp file for dnsx
-        with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
-            f.write("\n".join(subdomains))
-            domain_file = f.name
-            
+        # Pre-initialise to None so the finally block never hits NameError
+        # even if NamedTemporaryFile itself raises (e.g. disk full).
+        domain_file: str | None = None
+        output_path: Path | None = None
+
         try:
-            cmd = adapter.build_command(domain_file=domain_file)
-            result = await self.runner.run(command=cmd, timeout=300)
-            
-            records = adapter.parse(result)
-            
+            # Write subdomains to input file for dnsx
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".txt", delete=False, prefix="dnsx_in_"
+            ) as in_f:
+                in_f.write("\n".join(subdomains))
+                domain_file = in_f.name
+
+            # Output file — managed by us, not by the adapter
+            with tempfile.NamedTemporaryFile(
+                suffix=".json", delete=False, prefix="dnsx_out_"
+            ) as out_f:
+                output_path = Path(out_f.name)
+
+            cmd = adapter.build_command(
+                domain_file=domain_file,
+                output_file=output_path,
+            )
+            await self.runner.run(command=cmd, timeout=300)
+
+            records = adapter.parse_output_file(output_path)
+
             for record in records:
                 record.scan_id = self.scan_id
+                # Persist DNS record
                 self.db.insert_dns_record(record)
-                
-                await self.events.emit_discovery(
-                    event_type=EventType.HOST_RESOLVED,
-                    source=self.config.name,
-                    data={"domain": record.hostname, "ip": record.value},
-                    scan_id=self.scan_id,
-                    target=self.target
-                )
-        except Exception as e:
-            self.logger.debug(f"DNSx failed: {e}")
+
+                # ── Critical fix: also persist to ips table ───────────────
+                # PortScanModule reads from db.get_ips(). Without this,
+                # IPs discovered exclusively via DNSx are never port-scanned.
+                if record.record_type in ("A", "AAAA"):
+                    ip_record = IPRecord(
+                        scan_id=self.scan_id,
+                        ip=record.value,
+                        version=_ip_version(record.value),
+                        hostnames=[record.hostname],
+                        is_private=_is_private(record.value),
+                        source="dnsx",
+                    )
+                    self.db.insert_ip(ip_record)  # INSERT OR IGNORE — idempotent
+
+                    await self.events.emit_discovery(
+                        event_type=EventType.HOST_RESOLVED,
+                        source=self.config.name,
+                        data={
+                            "domain": record.hostname,
+                            "ip": record.value,
+                            "version": ip_record.version,
+                        },
+                        scan_id=self.scan_id,
+                        target=self.target,
+                    )
+
+        except Exception as exc:
+            self.logger.debug(f"DNSx run failed: {exc}", module=self.config.name)
         finally:
-            if os.path.exists(domain_file):
-                os.remove(domain_file)
+            # Safe cleanup — none of these raise even if the paths are None
+            if domain_file:
+                Path(domain_file).unlink(missing_ok=True)
+            if output_path:
+                output_path.unlink(missing_ok=True)
 
         self.logger.module_complete(self.config.name)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _ip_version(addr: str) -> int:
+    try:
+        return ipaddress.ip_address(addr).version
+    except ValueError:
+        return 4
+
+
+def _is_private(addr: str) -> bool:
+    try:
+        return ipaddress.ip_address(addr).is_private
+    except ValueError:
+        return False
