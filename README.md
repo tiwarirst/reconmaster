@@ -13,7 +13,7 @@ ReconAI is a modular, authorized reconnaissance and attack-surface intelligence 
 ## Installation (Kali Linux)
 
 ```bash
-git clone https://github.com/yourorg/reconai
+git clone https://github.com/tiwarirst/reconai
 cd reconai
 ./install.sh
 source .venv/bin/activate
