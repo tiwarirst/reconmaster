@@ -61,7 +61,7 @@ Ensure you have Python 3.9+ installed. ReconAI relies on several external Go/Pyt
 
 ### 2. Install ReconAI
 ```bash
-git clone https://github.com/yourusername/reconai.git
+git clone https://github.com/tiwarirst/reconai.git
 cd reconai
 python -m pip install -r requirements.txt
 ```
