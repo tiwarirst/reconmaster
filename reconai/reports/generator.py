@@ -58,6 +58,7 @@ class ReportGenerator:
         subs = self.db.get_subdomains(self.scan_id)
         ports = self.db.get_ports(self.scan_id)
         techs = self.db.get_technologies(self.scan_id)
+        cloud_assets = self.db.get_cloud_assets(self.scan_id)
 
         scoring = RiskScoringEngine(self.db, self.scan_id)
         risk: dict[str, Any] = scoring.calculate_score()
@@ -80,6 +81,7 @@ class ReportGenerator:
             f"| Open Ports | {stats.get('ports', 0)} |",
             f"| URLs | {stats.get('urls', 0)} |",
             f"| Technologies | {stats.get('technologies', 0)} |",
+            f"| Cloud Assets | {stats.get('cloud_assets', 0)} |",
             f"| Findings | {stats.get('findings', 0)} |",
             "",
             "## Findings",
@@ -144,6 +146,23 @@ class ReportGenerator:
                 lines.append(f"- **{t['name']}** {t['version']} on {t['host']}")
         else:
             lines.append("No technologies detected.")
+
+        lines.extend([
+            "",
+            "### Cloud Assets & Storage",
+            "",
+        ])
+
+        if cloud_assets:
+            lines.append("| Provider | Type | Asset Name | Public | Writable | URL |")
+            lines.append("|----------|------|------------|--------|----------|-----|")
+            for c in cloud_assets:
+                pub = "YES" if c.get("is_public") else "No"
+                writ = "YES" if c.get("is_writable") else "No"
+                url = c.get("url", "")
+                lines.append(f"| {c.get('provider', '').upper()} | {c.get('asset_type')} | {c.get('asset_name')} | {pub} | {writ} | {url} |")
+        else:
+            lines.append("No cloud assets or storage buckets discovered.")
 
         out_file = self.reports_dir / "report.md"
         with open(out_file, "w", encoding="utf-8") as fp:

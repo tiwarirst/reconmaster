@@ -230,3 +230,19 @@ class ToolRunRecord(BaseModel):
     output_file: str = ""
     started_at: datetime = Field(default_factory=datetime.now)
     completed_at: datetime | None = None
+
+
+class CloudAssetRecord(BaseModel):
+    """A discovered cloud resource (bucket, CDN, hosted service, etc.)."""
+    id: int = 0
+    scan_id: str = ""
+    provider: str = ""           # aws, gcp, azure, cloudflare, heroku, vercel, netlify
+    asset_type: str = ""         # s3_bucket, gcs_bucket, blob_container, cloudfront, app_service, etc.
+    asset_name: str = ""         # actual resource name / identifier
+    url: str = ""                # full URL if applicable
+    is_public: bool = False      # publicly accessible?
+    is_writable: bool = False    # publicly writable? (critical misconfiguration)
+    region: str = ""             # cloud region (us-east-1, eu-west-1, etc.)
+    metadata: dict[str, Any] = Field(default_factory=dict)  # extra provider-specific data
+    source: str = ""             # which module discovered this asset
+    timestamp: datetime = Field(default_factory=datetime.now)

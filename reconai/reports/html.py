@@ -37,6 +37,13 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   .sev-medium {{ color:var(--medium); }}
   .sev-low {{ color:var(--low); }}
   .sev-info {{ color:var(--low); opacity:.7; }}
+  .badge {{ display:inline-block; padding:2px 8px; border-radius:4px; font-size:0.75rem; font-weight:700; text-transform:uppercase; }}
+  .badge-aws {{ background:#ff9900; color:#111; }}
+  .badge-gcp {{ background:#4285f4; color:#fff; }}
+  .badge-azure {{ background:#0089d6; color:#fff; }}
+  .badge-other {{ background:var(--border); color:var(--text); }}
+  .public-tag {{ color:var(--critical); font-weight:700; }}
+  .writable-tag {{ background:var(--critical); color:#fff; padding:2px 6px; border-radius:4px; font-weight:700; }}
 </style>
 </head>
 <body>
@@ -62,6 +69,9 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
 <h2>Security Findings</h2>
 {findings_table}
+
+<h2>Cloud Assets & Storage ({cloud_count})</h2>
+{cloud_table}
 
 <h2>Subdomains ({sub_count})</h2>
 {subdomains_table}
@@ -100,6 +110,7 @@ def generate_html_report(db: "DatabaseManager", scan_id: str, out_dir: Path) -> 
     subs = db.get_subdomains(scan_id)
     ports = db.get_ports(scan_id)
     techs = db.get_technologies(scan_id)
+    cloud_assets = db.get_cloud_assets(scan_id)
     risk = RiskScoringEngine(db, scan_id).calculate_score()
 
     # Stats cards
@@ -109,6 +120,7 @@ def generate_html_report(db: "DatabaseManager", scan_id: str, out_dir: Path) -> 
         _stat_card("URLs", stats.get("urls", 0)),
         _stat_card("Technologies", stats.get("technologies", 0)),
         _stat_card("Findings", stats.get("findings", 0)),
+        _stat_card("Cloud Assets", stats.get("cloud_assets", 0)),
         _stat_card("Certificates", stats.get("certificates", 0)),
     ])
 
@@ -123,6 +135,33 @@ def generate_html_report(db: "DatabaseManager", scan_id: str, out_dir: Path) -> 
         findings_table = f'<table><tr><th>Severity</th><th>Title</th><th>Asset</th><th>Confidence</th></tr>{rows}</table>'
     else:
         findings_table = "<p>No security findings discovered.</p>"
+
+    # Cloud Assets table
+    if cloud_assets:
+        def _prov_badge(prov: str) -> str:
+            p = prov.lower()
+            badge_cls = f"badge-{p}" if p in ("aws", "gcp", "azure") else "badge-other"
+            return f'<span class="badge {badge_cls}">{prov.upper()}</span>'
+
+        c_rows = []
+        for c in cloud_assets:
+            pub_tag = '<span class="public-tag">🚨 PUBLIC</span>' if c.get("is_public") else '<span style="color:var(--low);">Private</span>'
+            writ_tag = '<span class="writable-tag">⚠️ WRITABLE</span>' if c.get("is_writable") else '<span style="color:var(--low);">Read-Only</span>'
+            url = c.get("url", "")
+            link = f'<a href="{url}" target="_blank" style="color:var(--accent);text-decoration:none;">{c.get("asset_name")}</a>' if url else c.get("asset_name")
+            c_rows.append(
+                f'<tr><td>{_prov_badge(c.get("provider", ""))}</td>'
+                f'<td>{c.get("asset_type", "").replace("_", " ").title()}</td>'
+                f'<td>{link}</td>'
+                f'<td>{pub_tag}</td>'
+                f'<td>{writ_tag}</td></tr>'
+            )
+        cloud_table = (
+            '<table><tr><th>Provider</th><th>Type</th><th>Asset Name / URL</th>'
+            '<th>Exposure</th><th>Permission</th></tr>' + "".join(c_rows) + '</table>'
+        )
+    else:
+        cloud_table = "<p>No cloud assets or storage buckets discovered.</p>"
 
     # Subdomains table
     if subs:
@@ -160,6 +199,8 @@ def generate_html_report(db: "DatabaseManager", scan_id: str, out_dir: Path) -> 
         risk_grade=risk["grade"],
         stats_cards=stats_cards,
         findings_table=findings_table,
+        cloud_count=len(cloud_assets),
+        cloud_table=cloud_table,
         sub_count=len(subs),
         subdomains_table=subdomains_table,
         ports_table=ports_table,

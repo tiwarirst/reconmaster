@@ -93,4 +93,32 @@ class CorrelationEngine:
                 "label":  "affects",
             })
 
+        # ── Cloud Asset nodes + edges ────────────────────────────────────
+        cloud_assets = self.db.get_cloud_assets(self.scan_id)
+        for ca in cloud_assets:
+            ca_id = f"cloud_{ca['provider']}_{ca['asset_name']}"
+            graph["nodes"].append({
+                "id":        ca_id,
+                "label":     f"{ca['provider'].upper()}: {ca['asset_name']}",
+                "type":      "cloud_asset",
+                "provider":  str(ca["provider"]),
+                "asset_type": str(ca["asset_type"]),
+                "is_public": str(bool(ca["is_public"])),
+            })
+
+            # If CNAME originated from a specific subdomain, link them
+            meta = ca.get("metadata")
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            cname_from = (meta or {}).get("cname_from")
+            if cname_from:
+                graph["edges"].append({
+                    "source": str(cname_from),
+                    "target": ca_id,
+                    "label":  "cloud_cname",
+                })
+
         return graph

@@ -37,16 +37,17 @@ ReconAI is built on a highly modular core:
 ```text
 reconai/
 ├── core/
-│   ├── database/     # Idempotent SQLite managers & typed models
+│   ├── database/     # Idempotent SQLite managers & typed models (CloudAssetRecord, etc.)
 │   ├── events/       # Fast O(1) async event bus for module triggering
 │   ├── executor/     # Safe async subprocess runner & timeout managers
-│   └── correlation/  # Attack surface graph builder
-├── integrations/     # Stateless wrappers (Nmap, Nuclei, FFuF, SQLMap, Dalfox)
+│   └── correlation/  # Attack surface graph builder (including Cloud Asset nodes)
+├── integrations/     # Stateless wrappers (Nmap, Nuclei, FFuF, SQLMap, Dalfox, CloudEnum)
 ├── modules/
 │   ├── passive/      # DNS Enum, crt.sh, Whois, Waybackurls
 │   ├── active/       # Subfinder, Nmap Port Scanning, HTTP Probing
 │   ├── web/          # FFuF Dir Brute, WhatWeb, Katana Crawler
-│   └── vuln/         # Nuclei, SQLi (SQLMap), XSS (Dalfox), Secrets
+│   ├── vuln/         # Nuclei, SQLi (SQLMap), XSS (Dalfox), Secrets
+│   └── cloud/        # Multi-Cloud Buckets (S3/GCS/Azure), CNAME Takeover, SSRF IMDS, IAM Validator
 └── cli/              # Rich console UI and orchestration logic
 ```
 
@@ -58,6 +59,7 @@ Ensure you have Python 3.9+ installed. ReconAI relies on several external Go/Pyt
 * `subfinder`, `dnsx`, `naabu` / `nmap`
 * `httpx`, `katana`, `waybackurls`
 * `ffuf`, `whatweb`, `sqlmap`, `dalfox`, `nuclei`, `trufflehog`
+* `cloud_enum` (Optional: `pip install cloud-enum`)
 
 ### 2. Install ReconAI
 ```bash
@@ -71,23 +73,33 @@ python -m pip install -r requirements.txt
 ReconAI provides a beautiful, terminal-rich CLI. 
 
 ```bash
+# Cloud-focused reconnaissance (S3/GCS/Azure buckets, CNAME takeover, SSRF metadata, IAM validation)
+python -m reconai scan example.com --mode cloud
+
+# Full deep reconnaissance (All modules including active web, vuln scanning, and cloud)
+python -m reconai scan example.com --mode deep
+
 # Basic passive reconnaissance
-python -m reconai --target example.com --mode passive
+python -m reconai scan example.com --mode passive
 
-# Comprehensive web + vulnerability scan
-python -m reconai --target example.com --mode full --output report.html
+# Light reconnaissance
+python -m reconai scan example.com --mode light
 
-# Run specific modules only
-python -m reconai --target example.com --modules subdomains,dnsx,http_probe,nuclei
+# Check tool health and installations
+python -m reconai doctor
+
+# Compare two scans to detect new assets and changes
+python -m reconai compare <old_scan_id> <new_scan_id>
 ```
 
 ### Modes of Operation
 
 1. **Passive**: Queries third-party APIs (crt.sh, Archive.org, DNS) without sending direct traffic to the target.
-2. **Active**: Performs DNS resolution, port scanning, and basic HTTP probing.
-3. **Web**: Actively crawls web applications, brute-forces directories, and fingerprints technology stacks.
-4. **Vuln**: Launches heavy offensive payloads (SQLMap, Dalfox, Nuclei) against discovered attack surfaces.
-5. **Full**: Chains all of the above continuously.
+2. **Light**: Passive recon + fast non-intrusive HTTP probing.
+3. **Standard**: Subdomains, port scanning, technology fingerprinting, crawling, and vulnerability checks.
+4. **Deep**: Full active scan, directory fuzzing, crawling, heavy vuln checks, and complete cloud reconnaissance.
+5. **Cloud**: Multi-provider storage bucket enumeration (AWS S3, GCP Storage, Azure Blobs), 40+ CNAME service fingerprints, subdomain takeover detection, SSRF→cloud metadata bypasses, and IAM credential validation.
+6. **Browser / Authenticated**: Real-browser crawling leveraging Chrome CDP sessions.
 
 ## 🧠 The "God-Level" Standards (Internal Audit)
 

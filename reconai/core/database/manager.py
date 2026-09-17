@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from reconai.core.database.models import (
-    APIEndpoint, CertificateRecord, DNSRecord, DomainRecord,
+    APIEndpoint, CertificateRecord, CloudAssetRecord, DNSRecord, DomainRecord,
     FindingRecord, IPRecord, PortRecord, ScanRecord, ScanStatus,
     ServiceRecord, SubdomainRecord, TechnologyRecord,
     ToolRunRecord, URLRecord,
@@ -225,6 +225,24 @@ CREATE INDEX IF NOT EXISTS idx_urls_scan ON urls(scan_id);
 CREATE INDEX IF NOT EXISTS idx_findings_scan ON findings(scan_id);
 CREATE INDEX IF NOT EXISTS idx_techs_scan ON technologies(scan_id);
 CREATE INDEX IF NOT EXISTS idx_ips_scan ON ips(scan_id);
+
+CREATE TABLE IF NOT EXISTS cloud_assets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_id TEXT,
+    provider TEXT NOT NULL,
+    asset_type TEXT NOT NULL,
+    asset_name TEXT NOT NULL,
+    url TEXT DEFAULT '',
+    is_public INTEGER DEFAULT 0,
+    is_writable INTEGER DEFAULT 0,
+    region TEXT DEFAULT '',
+    metadata TEXT DEFAULT '{}',
+    source TEXT DEFAULT '',
+    timestamp TEXT,
+    UNIQUE(scan_id, provider, asset_type, asset_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cloud_assets_scan ON cloud_assets(scan_id);
 """
 
 
@@ -485,6 +503,24 @@ class DatabaseManager:
         except Exception:
             return 0
 
+    def insert_cloud_asset(self, record: CloudAssetRecord) -> int:
+        """Insert a cloud asset, silently ignoring exact duplicates (same scan, provider, type, name)."""
+        try:
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO cloud_assets "
+                "(scan_id, provider, asset_type, asset_name, url, is_public, is_writable, "
+                "region, metadata, source, timestamp) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (record.scan_id, record.provider, record.asset_type, record.asset_name,
+                 record.url, int(record.is_public), int(record.is_writable),
+                 record.region, json.dumps(record.metadata), record.source,
+                 record.timestamp.isoformat()),
+            )
+            self.conn.commit()
+            return cur.lastrowid or 0
+        except Exception:
+            return 0
+
     # ── Query Operations ────────────────────────────────────
 
     def get_subdomains(self, scan_id: str) -> list[dict[str, Any]]:
@@ -578,6 +614,7 @@ class DatabaseManager:
         tables = [
             "subdomains", "dns_records", "ips", "ports",
             "urls", "technologies", "certificates", "api_endpoints", "findings",
+            "cloud_assets",
         ]
         stats: dict[str, int] = {}
         for table in tables:
@@ -586,6 +623,20 @@ class DatabaseManager:
             ).fetchone()
             stats[table] = int(row["c"]) if row else 0
         return stats
+
+    def get_cloud_assets(self, scan_id: str, provider: str = "") -> list[dict[str, Any]]:
+        """Get all cloud assets for a scan, optionally filtered by provider."""
+        if provider:
+            rows = self.conn.execute(
+                "SELECT * FROM cloud_assets WHERE scan_id = ? AND provider = ? ORDER BY provider, asset_type",
+                (scan_id, provider),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM cloud_assets WHERE scan_id = ? ORDER BY provider, asset_type",
+                (scan_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # ── Comparison ──────────────────────────────────────────
 
@@ -601,4 +652,5 @@ class DatabaseManager:
             "certificates": self.get_certificates(scan_id),
             "api_endpoints": self.get_api_endpoints(scan_id),
             "ips":          self.get_ips(scan_id),
+            "cloud_assets": self.get_cloud_assets(scan_id),
         }

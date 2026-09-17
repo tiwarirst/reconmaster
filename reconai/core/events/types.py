@@ -34,6 +34,7 @@ class EventType(str, Enum):
     API_DISCOVERED = "api.discovered"
     TECHNOLOGY_DETECTED = "technology.detected"
     CERTIFICATE_DISCOVERED = "certificate.discovered"
+    CLOUD_ASSET_DISCOVERED = "cloud.asset.discovered"
 
     # Findings
     FINDING_CREATED = "finding.created"

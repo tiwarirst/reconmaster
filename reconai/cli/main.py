@@ -44,6 +44,11 @@ import reconai.modules.vuln.secrets
 import reconai.modules.vuln.sqlmap
 import reconai.modules.vuln.dalfox
 import reconai.modules.web.host_browser
+# Cloud enumeration modules
+import reconai.modules.cloud.bucket_enum
+import reconai.modules.cloud.cloud_enum
+import reconai.modules.cloud.metadata_ssrf
+import reconai.modules.cloud.iam_analyzer
 
 
 @click.group()
@@ -69,7 +74,7 @@ def cli(ctx: click.Context, debug: bool, verbose: bool, config: str | None) -> N
 
 @cli.command()
 @click.argument("target")
-@click.option("-m", "--mode", type=click.Choice(["passive", "light", "standard", "deep", "browser", "authenticated"]), default="standard", help="Scan mode")
+@click.option("-m", "--mode", type=click.Choice(["passive", "light", "standard", "deep", "browser", "authenticated", "cloud"]), default="standard", help="Scan mode")
 @click.option("-p", "--profile", type=click.Choice(["quick", "standard", "service", "full"]), default="quick", help="Port scan profile")
 @click.option("--timeout", type=int, help="Global timeout override (seconds)")
 @click.option("--dry-run", is_flag=True, help="Show what would be run without executing")
@@ -175,7 +180,9 @@ def doctor(ctx: click.Context) -> None:
         "nmap", "amass", "subfinder", "httpx", "nuclei", "whatweb",
         "waybackurls", "wafw00f", "trufflehog", "naabu", "masscan",
         "gobuster", "ffuf", "dig", "whois", "katana", "sqlmap",
-        "dalfox", "paramspider", "dnsx", "gowitness"
+        "dalfox", "paramspider", "dnsx", "gowitness",
+        # Cloud enumeration tools
+        "cloud_enum",
     ]
     
     results = {}
@@ -257,8 +264,16 @@ def compare(ctx: click.Context, old_scan_id: str, new_scan_id: str) -> None:
     for port in (old_ports - new_ports):
         console.console.print(f"[bold red]- Closed Port:[/bold red] {port}")
 
-    if old_subs == new_subs and old_ports == new_ports:
-        console.success("No changes detected in subdomains or ports.")
+    # Compare Cloud Assets
+    old_ca = {f"[{c['provider'].upper()}] {c['asset_name']} ({c['asset_type']})" for c in old_data.get("cloud_assets", [])}
+    new_ca = {f"[{c['provider'].upper()}] {c['asset_name']} ({c['asset_type']})" for c in new_data.get("cloud_assets", [])}
+    for ca in (new_ca - old_ca):
+        console.console.print(f"[bold green]+ New Cloud Asset:[/bold green] {ca}")
+    for ca in (old_ca - new_ca):
+        console.console.print(f"[bold red]- Removed Cloud Asset:[/bold red] {ca}")
+
+    if old_subs == new_subs and old_ports == new_ports and old_ca == new_ca:
+        console.success("No changes detected in subdomains, ports, or cloud assets.")
 
 
 @cli.command()

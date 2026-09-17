@@ -23,7 +23,9 @@ class ChangeDetector:
             "new_ports": [],
             "closed_ports": [],
             "new_findings": [],
-            "resolved_findings": []
+            "resolved_findings": [],
+            "new_cloud_assets": [],
+            "removed_cloud_assets": [],
         }
         
         # Compare Subdomains
@@ -46,5 +48,12 @@ class ChangeDetector:
         
         diff["new_findings"] = list(new_finds - old_finds)
         diff["resolved_findings"] = list(old_finds - new_finds)
+
+        # Compare Cloud Assets
+        old_ca = {f"[{c['provider'].upper()}] {c['asset_name']} ({c['asset_type']})" for c in old_data.get("cloud_assets", [])}
+        new_ca = {f"[{c['provider'].upper()}] {c['asset_name']} ({c['asset_type']})" for c in new_data.get("cloud_assets", [])}
+
+        diff["new_cloud_assets"] = list(new_ca - old_ca)
+        diff["removed_cloud_assets"] = list(old_ca - new_ca)
         
         return diff

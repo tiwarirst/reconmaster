@@ -69,6 +69,8 @@ class Analyzer:
                 if intel.is_in_cisa_kev:
                     cisa_kev_count += 1
 
+        cloud_count = stats.get("cloud_assets", 0)
+
         prompt = (
             "You are a Principal Security Engineer writing an executive summary for a "
             "Fortune 500 client's CISO. A penetration test discovered the following:\\n\\n"
@@ -77,7 +79,8 @@ class Analyzer:
             f"CVEs Identified: {len(cves)} | "
             f"Actively Exploited in the Wild (CISA KEV): {cisa_kev_count}\\n"
             f"Attack Surface: {stats.get('subdomains', 0)} subdomains, "
-            f"{stats.get('ports', 0)} open ports\\n\\n"
+            f"{stats.get('ports', 0)} open ports, "
+            f"{cloud_count} cloud assets (S3/GCS/Azure buckets & services)\\n\\n"
             f"FINDINGS:\\n{findings_text}\\n\\n"
             "Write a 3-paragraph executive summary that:\\n"
             "1. Explains the overall risk posture in business terms (no jargon)\\n"

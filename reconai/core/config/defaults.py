@@ -22,6 +22,10 @@ TIMEOUTS = {
     "certificate_query": 20,
     "subdomain_tool": 120,
     "whois_lookup": 20,
+    "cloud_bucket_enum": 180,   # Bucket permutation probing (~150 names × 3 providers)
+    "cloud_enum_tool": 120,     # External cloud_enum tool run
+    "cloud_metadata_ssrf": 90,  # SSRF probing (capped at 100 URLs)
+    "cloud_iam_analysis": 60,   # Read-only IAM validation calls
     "default": 60,
 }
 
@@ -34,6 +38,8 @@ CONCURRENCY = {
     "subdomain": 5,
     "port_scan": 3,
     "directory": 10,
+    "cloud_bucket": 15,   # Concurrent bucket probes (DNS-first keeps rate-limit impact low)
+    "cloud_ssrf": 5,      # Conservative — direct target probing
     "default": 10,
 }
 
@@ -113,8 +119,10 @@ SCAN_MODES = {
             "katana_crawler", "js_analysis",
             "nuclei_vuln", "secrets", "sqlmap", "dalfox",
             "vuln_intelligence", "screenshot",
+            # Cloud enumeration (runs after web modules have populated the URL/param DB)
+            "bucket_enum", "cloud_enum_module", "metadata_ssrf", "iam_analyzer",
         ],
-        "description": "Deep reconnaissance — full active scan, fuzzing, and vuln detection",
+        "description": "Deep reconnaissance — full active scan, fuzzing, vuln detection, and cloud enumeration",
     },
     "browser": {
         "modules": [
@@ -134,6 +142,28 @@ SCAN_MODES = {
             "nuclei_vuln", "screenshot",
         ],
         "description": "Authenticated crawl using your real browser sessions (requires Chrome CDP on port 9222)",
+    },
+    "cloud": {
+        "modules": [
+            # Phase 1: Establish DNS/subdomain landscape (feeds CNAME fingerprinting)
+            "dns_enum", "whois", "cert_transparency", "dnsx",
+            # Phase 2: Light HTTP probing (feeds parameterized URL DB for SSRF module)
+            "http_probe",
+            # Phase 3: Cloud-specific enumeration
+            "bucket_enum",          # Multi-cloud storage bucket brute-force
+            "cloud_enum_module",    # CNAME fingerprinting + dangling DNS takeover
+            # Phase 4: Credential discovery and exploitation paths
+            "secrets",              # Find leaked credentials in JS/responses
+            "metadata_ssrf",        # SSRF → cloud metadata credential theft
+            "iam_analyzer",         # Validate discovered credentials + blast radius
+            # Phase 5: Standard vuln scan on discovered attack surface
+            "nuclei_vuln",
+        ],
+        "description": (
+            "Cloud-focused recon -- multi-provider bucket discovery, CNAME-based service "
+            "fingerprinting, subdomain takeover detection, SSRF->metadata credential theft, "
+            "and IAM credential validation."
+        ),
     },
 }
 
