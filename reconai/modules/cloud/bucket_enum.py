@@ -86,8 +86,20 @@ class BucketEnumModule(ReconModule):
             return
 
         domain = kwargs.get("domain", self.target)
-        # Strip protocol and path, use just the bare domain
-        domain = re.sub(r"^https?://", "", domain).split("/")[0].strip()
+        # Strip protocol, port, and path, use just the bare domain
+        domain = re.sub(r"^https?://", "", domain).split("/")[0].split(":")[0].strip()
+
+        # Target IP address check: skip bucket permutations for raw IPs
+        import ipaddress
+        try:
+            ipaddress.ip_address(domain)
+            self.logger.info(
+                f"[CLOUD] Target '{domain}' is a raw IP address; skipping name-based bucket permutations.",
+                module=self.config.name,
+            )
+            return
+        except ValueError:
+            pass
 
         names = _generate_permutations(domain)
         self.logger.module_start(

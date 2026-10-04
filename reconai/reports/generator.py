@@ -170,11 +170,77 @@ class ReportGenerator:
 
         return out_file
 
-    def generate_all(self) -> dict[str, Path]:
+    def generate_csv(self) -> dict[str, Path]:
+        """Export tabular scan data to CSV spreadsheets for enterprise/reporting workflows."""
+        import csv
+
+        csv_dir = self.reports_dir / "csv"
+        csv_dir.mkdir(parents=True, exist_ok=True)
+        csv_files: dict[str, Path] = {}
+
+        # 1. Findings CSV
+        findings_path = csv_dir / "findings.csv"
+        findings = self.db.get_findings(self.scan_id)
+        f_fields = ["title", "severity", "confidence", "status", "affected_asset", "affected_asset_type", "description", "remediation", "cvss"]
+        with open(findings_path, "w", newline="", encoding="utf-8") as fp:
+            writer = csv.DictWriter(fp, fieldnames=f_fields, extrasaction="ignore")
+            writer.writeheader()
+            for f in findings:
+                writer.writerow(f)
+        csv_files["findings"] = findings_path
+
+        # 2. Cloud Assets CSV
+        cloud_path = csv_dir / "cloud_assets.csv"
+        cloud_assets = self.db.get_cloud_assets(self.scan_id)
+        c_fields = ["provider", "asset_type", "asset_name", "url", "is_public", "is_writable", "region", "source"]
+        with open(cloud_path, "w", newline="", encoding="utf-8") as fp:
+            writer = csv.DictWriter(fp, fieldnames=c_fields, extrasaction="ignore")
+            writer.writeheader()
+            for c in cloud_assets:
+                writer.writerow(c)
+        csv_files["cloud_assets"] = cloud_path
+
+        # 3. Subdomains CSV
+        subs_path = csv_dir / "subdomains.csv"
+        subs = self.db.get_subdomains(self.scan_id)
+        s_fields = ["subdomain", "is_alive", "resolved_ips", "http_status", "title"]
+        with open(subs_path, "w", newline="", encoding="utf-8") as fp:
+            writer = csv.DictWriter(fp, fieldnames=s_fields, extrasaction="ignore")
+            writer.writeheader()
+            for s in subs:
+                writer.writerow(s)
+        csv_files["subdomains"] = subs_path
+
+        # 4. API Endpoints CSV
+        api_path = csv_dir / "api_endpoints.csv"
+        apis = self.db.get_api_endpoints(self.scan_id)
+        a_fields = ["host", "method", "path", "full_url", "api_type", "auth_required", "source"]
+        with open(api_path, "w", newline="", encoding="utf-8") as fp:
+            writer = csv.DictWriter(fp, fieldnames=a_fields, extrasaction="ignore")
+            writer.writeheader()
+            for a in apis:
+                writer.writerow(a)
+        csv_files["api_endpoints"] = api_path
+
+        # 5. Ports CSV
+        ports_path = csv_dir / "ports.csv"
+        ports = self.db.get_ports(self.scan_id)
+        p_fields = ["host", "port", "protocol", "state", "service", "product", "version"]
+        with open(ports_path, "w", newline="", encoding="utf-8") as fp:
+            writer = csv.DictWriter(fp, fieldnames=p_fields, extrasaction="ignore")
+            writer.writeheader()
+            for p in ports:
+                writer.writerow(p)
+        csv_files["ports"] = ports_path
+
+        return csv_files
+
+    def generate_all(self) -> dict[str, Any]:
         """Generate all report formats."""
         html_path = generate_html_report(self.db, self.scan_id, self.reports_dir)
         return {
             "json": self.generate_json(),
             "markdown": self.generate_markdown(),
             "html": html_path,
+            "csv": self.generate_csv(),
         }

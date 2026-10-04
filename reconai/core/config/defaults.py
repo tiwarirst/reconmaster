@@ -90,36 +90,38 @@ SCAN_MODES = {
     "passive": {
         "modules": [
             "dns_enum", "whois", "cert_transparency", "archive_urls",
-            "paramspider", "dnsx",
+            "paramspider", "dnsx", "email_security", "saas_enum",
         ],
         "description": "Passive reconnaissance only — no direct target interaction",
     },
     "light": {
         "modules": [
             "dns_enum", "whois", "cert_transparency", "archive_urls",
-            "dnsx", "http_probe",
+            "dnsx", "http_probe", "email_security", "saas_enum",
         ],
         "description": "Passive recon + lightweight HTTP probing",
     },
     "standard": {
         "modules": [
             "dns_enum", "whois", "cert_transparency", "archive_urls",
-            "dnsx", "http_probe", "naabu_ports", "ports",
-            "technologies", "headers", "waf_detection",
+            "dnsx", "http_probe", "naabu_ports", "ports", "cdn_classifier",
+            "technologies", "headers", "waf_detection", "email_security",
+            "saas_enum", "api_miner", "dev_artifacts",
         ],
         "description": "Standard reconnaissance — passive + port scan + tech fingerprinting",
     },
     "deep": {
         "modules": [
             "dns_enum", "whois", "cert_transparency", "archive_urls",
-            "paramspider", "dnsx",
-            "http_probe", "naabu_ports", "ports", "subdomains_active",
+            "paramspider", "dnsx", "email_security", "saas_enum",
+            "http_probe", "naabu_ports", "ports", "cdn_classifier", "subdomains_active",
             "technologies", "headers", "waf_detection",
             "crawler", "ffuf_dir", "directory_discovery",
+            "api_miner", "dev_artifacts",
             "katana_crawler", "js_analysis",
             "nuclei_vuln", "secrets", "sqlmap", "dalfox",
             "vuln_intelligence", "screenshot",
-            # Cloud enumeration (runs after web modules have populated the URL/param DB)
+            # Cloud enumeration
             "bucket_enum", "cloud_enum_module", "metadata_ssrf", "iam_analyzer",
         ],
         "description": "Deep reconnaissance — full active scan, fuzzing, vuln detection, and cloud enumeration",
@@ -145,16 +147,16 @@ SCAN_MODES = {
     },
     "cloud": {
         "modules": [
-            # Phase 1: Establish DNS/subdomain landscape (feeds CNAME fingerprinting)
-            "dns_enum", "whois", "cert_transparency", "dnsx",
-            # Phase 2: Light HTTP probing (feeds parameterized URL DB for SSRF module)
-            "http_probe",
+            # Phase 1: Establish DNS/subdomain landscape
+            "dns_enum", "whois", "cert_transparency", "dnsx", "email_security", "saas_enum",
+            # Phase 2: Light HTTP probing & CDN classification
+            "http_probe", "cdn_classifier",
             # Phase 3: Cloud-specific enumeration
             "bucket_enum",          # Multi-cloud storage bucket brute-force
             "cloud_enum_module",    # CNAME fingerprinting + dangling DNS takeover
             # Phase 4: Credential discovery and exploitation paths
             "secrets",              # Find leaked credentials in JS/responses
-            "metadata_ssrf",        # SSRF → cloud metadata credential theft
+            "metadata_ssrf",        # SSRF -> cloud metadata credential theft
             "iam_analyzer",         # Validate discovered credentials + blast radius
             # Phase 5: Standard vuln scan on discovered attack surface
             "nuclei_vuln",

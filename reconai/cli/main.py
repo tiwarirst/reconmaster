@@ -49,6 +49,12 @@ import reconai.modules.cloud.bucket_enum
 import reconai.modules.cloud.cloud_enum
 import reconai.modules.cloud.metadata_ssrf
 import reconai.modules.cloud.iam_analyzer
+# Extended enterprise & posture modules
+import reconai.modules.passive.email_security
+import reconai.modules.passive.saas_enum
+import reconai.modules.web.api_miner
+import reconai.modules.web.dev_artifacts
+import reconai.modules.active.cdn_classifier
 
 
 @click.group()

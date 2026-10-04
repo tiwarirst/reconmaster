@@ -624,18 +624,23 @@ class DatabaseManager:
             stats[table] = int(row["c"]) if row else 0
         return stats
 
-    def get_cloud_assets(self, scan_id: str, provider: str = "") -> list[dict[str, Any]]:
-        """Get all cloud assets for a scan, optionally filtered by provider."""
+    def get_cloud_assets(
+        self, scan_id: str, provider: str = "", is_public: bool | None = None
+    ) -> list[dict[str, Any]]:
+        """Get all cloud assets for a scan, optionally filtered by provider and public status."""
+        query = "SELECT * FROM cloud_assets WHERE scan_id = ?"
+        params: list[Any] = [scan_id]
+
         if provider:
-            rows = self.conn.execute(
-                "SELECT * FROM cloud_assets WHERE scan_id = ? AND provider = ? ORDER BY provider, asset_type",
-                (scan_id, provider),
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                "SELECT * FROM cloud_assets WHERE scan_id = ? ORDER BY provider, asset_type",
-                (scan_id,),
-            ).fetchall()
+            query += " AND provider = ?"
+            params.append(provider)
+
+        if is_public is not None:
+            query += " AND is_public = ?"
+            params.append(int(is_public))
+
+        query += " ORDER BY provider, asset_type"
+        rows = self.conn.execute(query, tuple(params)).fetchall()
         return [dict(r) for r in rows]
 
     # ── Comparison ──────────────────────────────────────────
