@@ -68,28 +68,46 @@ class ReconLogger:
 
         return logger
 
+    # Reserved LogRecord attribute names that cannot be used in extra={}
+    _RESERVED_LOG_KEYS = frozenset({
+        "args", "created", "exc_info", "exc_text", "filename",
+        "funcName", "levelname", "levelno", "lineno", "message",
+        "module", "msecs", "msg", "name", "pathname", "process",
+        "processName", "relativeCreated", "stack_info", "thread",
+        "threadName",
+    })
+
+    def _safe_extra(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Rename reserved LogRecord keys to avoid KeyError on overwrite."""
+        return {
+            (f"recon_{k}" if k in self._RESERVED_LOG_KEYS else k): v
+            for k, v in kwargs.items()
+        }
+
     def info(self, message: str, **kwargs: Any) -> None:
-        self._loggers["app"].info(redact(message), extra=kwargs)
+        self._loggers["app"].info(redact(message), extra=self._safe_extra(kwargs))
 
     def debug(self, message: str, **kwargs: Any) -> None:
-        self._loggers["app"].debug(redact(message), extra=kwargs)
+        self._loggers["app"].debug(redact(message), extra=self._safe_extra(kwargs))
 
     def warning(self, message: str, **kwargs: Any) -> None:
-        self._loggers["app"].warning(redact(message), extra=kwargs)
-        self._loggers["error"].warning(redact(message), extra=kwargs)
+        safe = self._safe_extra(kwargs)
+        self._loggers["app"].warning(redact(message), extra=safe)
+        self._loggers["error"].warning(redact(message), extra=safe)
 
     def error(self, message: str, **kwargs: Any) -> None:
-        self._loggers["app"].error(redact(message), extra=kwargs)
-        self._loggers["error"].error(redact(message), extra=kwargs)
+        safe = self._safe_extra(kwargs)
+        self._loggers["app"].error(redact(message), extra=safe)
+        self._loggers["error"].error(redact(message), extra=safe)
 
     def command(self, cmd: list[str], **kwargs: Any) -> None:
         """Log a command execution."""
         cmd_str = " ".join(cmd)
-        self._loggers["cmd"].info(redact(cmd_str), extra=kwargs)
+        self._loggers["cmd"].info(redact(cmd_str), extra=self._safe_extra(kwargs))
 
     def audit(self, message: str, **kwargs: Any) -> None:
         """Log a security-relevant event."""
-        self._loggers["audit"].info(redact(message), extra=kwargs)
+        self._loggers["audit"].info(redact(message), extra=self._safe_extra(kwargs))
 
     def module_start(self, module_name: str, target: str = "") -> None:
         self.info(f"Module started: {module_name}" + (f" target={target}" if target else ""))
