@@ -134,13 +134,16 @@ class CommandRunner:
                             env=proc_env,
                         )
                     else:
+                        exec_kwargs: dict[str, Any] = {}
+                        if sys.platform != "win32":
+                            exec_kwargs["start_new_session"] = True
                         process = await asyncio.create_subprocess_exec(
                             *command,
                             stdout=asyncio.subprocess.PIPE,
                             stderr=asyncio.subprocess.PIPE,
                             cwd=str(cwd) if cwd else None,
                             env=proc_env,
-                            start_new_session=True,
+                            **exec_kwargs,
                         )
                 except PermissionError:
                     return CommandResult(

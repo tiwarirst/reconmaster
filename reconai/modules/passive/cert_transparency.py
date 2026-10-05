@@ -5,6 +5,7 @@ Queries crt.sh to find subdomains passively.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import httpx
@@ -25,15 +26,21 @@ class CertTransparencyModule(ReconModule):
     )
 
     async def run(self, **kwargs: Any) -> Any:
-        domains = kwargs.get("domains", [])
+        domains = list(kwargs.get("domains", []))
+        if not domains and self.target:
+            clean = self.target.split("://")[-1].split("/")[0].split(":")[0]
+            if clean:
+                domains = [clean]
+
         if not domains:
             return
 
         for domain in domains:
+            start = time.monotonic()
             self.logger.module_start(self.config.name, target=domain)
-            
+
             subdomains = await self._query_crtsh(domain)
-            
+
             for sub in subdomains:
                 # Add to DB
                 record = SubdomainRecord(
@@ -43,7 +50,7 @@ class CertTransparencyModule(ReconModule):
                     sources=["crt.sh"]
                 )
                 self.db.insert_subdomain(record)
-                
+
                 # Emit event
                 await self.events.emit_discovery(
                     event_type=EventType.SUBDOMAIN_DISCOVERED,
@@ -52,14 +59,15 @@ class CertTransparencyModule(ReconModule):
                     scan_id=self.scan_id,
                     target=self.target
                 )
-                
+
             self.logger.info(f"Found {len(subdomains)} subdomains via crt.sh for {domain}", module=self.config.name)
-            self.logger.module_complete(self.config.name)
+            duration = time.monotonic() - start
+            self.logger.module_complete(self.config.name, duration=duration)
 
     async def _query_crtsh(self, domain: str) -> set[str]:
         subdomains = set()
         url = f"https://crt.sh/?q=%.{domain}&output=json"
-        
+
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(url)
@@ -75,5 +83,5 @@ class CertTransparencyModule(ReconModule):
                                     subdomains.add(sub)
         except Exception as e:
             self.logger.warning(f"Failed to query crt.sh for {domain}: {e}", module=self.config.name)
-            
+
         return subdomains

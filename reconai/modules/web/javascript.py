@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from typing import Any
 
 import httpx
@@ -24,7 +25,7 @@ class JavaScriptAnalysisModule(ReconModule):
         description="Analyzes JS files for API endpoints and potential secrets",
         supports_timeout=True,
     )
-    
+
     # Regex for endpoints (e.g., /api/v1/users)
     PATH_REGEX = re.compile(r'["\'](/(?:api|v[0-9]|users|admin)[a-zA-Z0-9_/\-\.]*)["\']')
     # Regex for potential API keys/tokens (very basic for illustration)
@@ -32,24 +33,29 @@ class JavaScriptAnalysisModule(ReconModule):
 
     async def run(self, **kwargs: Any) -> Any:
         url_records = self.db.get_urls(self.scan_id)
-        js_urls = [r["url"] for r in url_records if r["url"].endswith(".js")]
-        
+        js_urls = [
+            r["url"] for r in url_records
+            if r.get("url", "").endswith(".js") or ".js?" in r.get("url", "")
+        ]
+
         if not js_urls:
             return
 
+        start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{len(js_urls)} JS files")
 
         async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
             tasks = [self._analyze_js(client, url) for url in js_urls[:50]]
-            await asyncio.gather(*tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)
 
     async def _analyze_js(self, client: httpx.AsyncClient, url: str) -> None:
         try:
             response = await client.get(url)
             content = response.text
-            
+
             # Find Endpoints
             paths = self.PATH_REGEX.findall(content)
             for path in set(paths):
@@ -67,7 +73,7 @@ class JavaScriptAnalysisModule(ReconModule):
                     scan_id=self.scan_id,
                     target=self.target
                 )
-                
+
             # Find Secrets
             secrets = self.SECRET_REGEX.findall(content)
             if secrets:
@@ -84,6 +90,17 @@ class JavaScriptAnalysisModule(ReconModule):
                     remediation="Remove the secret from client-side code and implement proper backend authentication.",
                 )
                 self.db.insert_finding(finding)
-                
+                await self.events.emit_discovery(
+                    event_type=EventType.FINDING_DISCOVERED,
+                    source=self.config.name,
+                    data={
+                        "title": finding.title,
+                        "severity": finding.severity.value,
+                        "asset": finding.affected_asset,
+                    },
+                    scan_id=self.scan_id,
+                    target=self.target,
+                )
+
         except Exception as e:
             self.logger.debug(f"JS analysis failed for {url}: {e}")

@@ -10,14 +10,17 @@ Fixes applied:
   - Scans URLs at depth 0 AND depth 1 (crawler-discovered endpoints).
     Depth-0-only previously missed all authenticated/internal API paths.
   - Temp file cleanup is guaranteed via try/finally.
+  - Added duration telemetry and real-time finding discovery events.
 """
 from __future__ import annotations
 
 import asyncio
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
+from reconai.core.events.types import EventType
 from reconai.integrations.nuclei import NucleiAdapter
 from reconai.modules.base import ModuleConfig, ReconModule
 from reconai.modules.registry import register_module
@@ -56,6 +59,7 @@ class NucleiModule(ReconModule):
             )
             return
 
+        start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{len(urls)} URLs (depth 0–1)")
 
         # Nuclei handles internal concurrency — cap at 2 processes to avoid overload
@@ -63,7 +67,8 @@ class NucleiModule(ReconModule):
         tasks = [self._scan_url(adapter, semaphore, url) for url in urls]
         await asyncio.gather(*tasks, return_exceptions=True)
 
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)
 
     async def _scan_url(
         self,
@@ -98,6 +103,18 @@ class NucleiModule(ReconModule):
                 for finding in findings:
                     finding.scan_id = self.scan_id
                     self.db.insert_finding(finding)
+                    await self.events.emit_discovery(
+                        event_type=EventType.FINDING_DISCOVERED,
+                        source=self.config.name,
+                        data={
+                            "title": finding.title,
+                            "severity": finding.severity.value,
+                            "asset": finding.affected_asset,
+                            "cve": finding.cve_id or "",
+                        },
+                        scan_id=self.scan_id,
+                        target=self.target,
+                    )
 
             except Exception as exc:
                 self.logger.debug(

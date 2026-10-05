@@ -7,14 +7,17 @@ Fix applied (BUG 1):
   Each concurrent _test_xss() call creates its own isolated file,
   passes the path to build_command + parse_output_file, and cleans
   up in a finally block. No shared adapter state → no race conditions.
+  Added duration telemetry and real-time finding discovery events.
 """
 from __future__ import annotations
 
 import asyncio
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
+from reconai.core.events.types import EventType
 from reconai.integrations.dalfox import DalfoxAdapter
 from reconai.modules.base import ModuleConfig, ReconModule
 from reconai.modules.registry import register_module
@@ -45,13 +48,15 @@ class DalfoxModule(ReconModule):
             self.logger.error("dalfox not available. Skipping XSS scan.", module=self.config.name)
             return
 
+        start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{len(urls)} parameterized URLs")
 
         semaphore = asyncio.Semaphore(3)
         tasks = [self._test_xss(adapter, semaphore, url) for url in urls]
         await asyncio.gather(*tasks, return_exceptions=True)
 
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)
 
     async def _test_xss(
         self,
@@ -82,6 +87,17 @@ class DalfoxModule(ReconModule):
                 for finding in findings:
                     finding.scan_id = self.scan_id
                     self.db.insert_finding(finding)
+                    await self.events.emit_discovery(
+                        event_type=EventType.FINDING_DISCOVERED,
+                        source=self.config.name,
+                        data={
+                            "title": finding.title,
+                            "severity": finding.severity.value,
+                            "asset": finding.affected_asset,
+                        },
+                        scan_id=self.scan_id,
+                        target=self.target,
+                    )
 
             except Exception as exc:
                 self.logger.debug(f"Dalfox scan failed for {url}: {exc}", module=self.config.name)

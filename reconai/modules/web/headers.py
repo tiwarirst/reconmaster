@@ -5,11 +5,13 @@ Analyzes HTTP responses for missing or misconfigured security headers.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, ClassVar
 
 import httpx
 
 from reconai.core.database.models import FindingRecord, FindingStatus, Severity, Confidence
+from reconai.core.events.types import EventType
 from reconai.modules.base import ModuleConfig, ReconModule
 from reconai.modules.registry import register_module
 
@@ -47,27 +49,35 @@ class SecurityHeadersModule(ReconModule):
     }
 
     async def run(self, **kwargs: Any) -> Any:
-        urls = kwargs.get("urls", [])
+        urls = list(kwargs.get("urls", []))
         if not urls:
             url_records = self.db.get_urls(self.scan_id)
-            urls = [r["url"] for r in url_records if r["status_code"] and r["status_code"] < 400]
-            
+            urls = [
+                r["url"] for r in url_records
+                if r.get("status_code") and r["status_code"] < 400
+            ]
+
+        if not urls and self.target:
+            urls = [self.target if self.target.startswith(("http://", "https://")) else f"https://{self.target}"]
+
         if not urls:
             return
 
+        start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{len(urls)} URLs")
 
         async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
             tasks = [self._check_headers(client, url) for url in urls[:20]] # Limit to 20 to avoid spam
-            await asyncio.gather(*tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)
 
     async def _check_headers(self, client: httpx.AsyncClient, url: str) -> None:
         try:
             response = await client.head(url)
             headers = {k.lower(): v for k, v in response.headers.items()}
-            
+
             for header, info in self.REQUIRED_HEADERS.items():
                 if header.lower() not in headers:
                     severity: Severity = info["severity"]  # already a Severity enum
@@ -85,5 +95,16 @@ class SecurityHeadersModule(ReconModule):
                         detection_method="HTTP response header analysis",
                     )
                     self.db.insert_finding(finding)
+                    await self.events.emit_discovery(
+                        event_type=EventType.FINDING_DISCOVERED,
+                        source=self.config.name,
+                        data={
+                            "title": finding.title,
+                            "severity": finding.severity.value,
+                            "asset": finding.affected_asset,
+                        },
+                        scan_id=self.scan_id,
+                        target=self.target,
+                    )
         except Exception as e:
             self.logger.debug(f"Header check failed for {url}: {e}")

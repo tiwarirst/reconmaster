@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ipaddress
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,11 @@ class DnsxModule(ReconModule):
         subs = self.db.get_subdomains(self.scan_id)
         subdomains: list[str] = [str(s["subdomain"]) for s in subs]
 
+        if not subdomains and self.target:
+            clean = self.target.split("://")[-1].split("/")[0].split(":")[0]
+            if clean:
+                subdomains = [clean]
+
         if not subdomains:
             return
 
@@ -55,6 +61,7 @@ class DnsxModule(ReconModule):
             )
             return
 
+        start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{len(subdomains)} subdomains")
 
         # Pre-initialise to None so the finally block never hits NameError
@@ -124,7 +131,8 @@ class DnsxModule(ReconModule):
             if output_path:
                 output_path.unlink(missing_ok=True)
 
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

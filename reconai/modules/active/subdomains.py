@@ -16,6 +16,7 @@ Fix applied (Flaw 11):
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 from reconai.core.database.models import SubdomainRecord
@@ -40,6 +41,11 @@ class SubdomainModule(ReconModule):
 
     async def run(self, **kwargs: Any) -> Any:
         domains: list[str] = list(kwargs.get("domains", []))
+        if not domains and self.target:
+            clean = self.target.split("://")[-1].split("/")[0].split(":")[0]
+            if clean:
+                domains = [clean]
+
         if not domains:
             return
 
@@ -47,6 +53,7 @@ class SubdomainModule(ReconModule):
         amass = AmassAdapter(self.runner)
 
         for domain in domains:
+            start = time.monotonic()
             self.logger.module_start(self.config.name, target=domain)
 
             subdomains: set[str] = set()
@@ -85,7 +92,8 @@ class SubdomainModule(ReconModule):
                 f"Found {len(subdomains)} unique subdomains via active tools for {domain}",
                 module=self.config.name,
             )
-            self.logger.module_complete(self.config.name)
+            duration = time.monotonic() - start
+            self.logger.module_complete(self.config.name, duration=duration)
 
     async def _run_subfinder(self, adapter: SubfinderAdapter, domain: str) -> set[str]:
         cmd = adapter.build_command(domain=domain)

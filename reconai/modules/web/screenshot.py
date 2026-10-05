@@ -5,6 +5,7 @@ Uses Gowitness to take screenshots of all discovered live URLs.
 from __future__ import annotations
 
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -23,22 +24,23 @@ class ScreenshotModule(ReconModule):
     )
 
     async def run(self, **kwargs: Any) -> Any:
+        start = time.monotonic()
         self.logger.module_start(self.config.name)
 
         # Get all live URLs (200 OK, 401, 403)
         urls = self.db.get_urls(self.scan_id)
-        live_urls = [u["url"] for u in urls if u["status_code"] in (200, 401, 403)]
+        live_urls = [u["url"] for u in urls if u.get("status_code") in (200, 401, 403)]
 
         if not live_urls:
             self.logger.info("No live URLs found to screenshot.")
-            self.logger.module_complete(self.config.name)
+            self.logger.module_complete(self.config.name, duration=time.monotonic() - start)
             return
 
         # ── Instantiate adapter with the module's runner (required by ToolAdapter) ──
         adapter = GowitnessAdapter(runner=self.runner)
         if not await adapter.is_available():
             self.logger.warning(f"{adapter.name} is not installed. Skipping screenshots.")
-            self.logger.module_complete(self.config.name)
+            self.logger.module_complete(self.config.name, duration=time.monotonic() - start)
             return
 
         # Write URLs to a temporary file
@@ -55,7 +57,8 @@ class ScreenshotModule(ReconModule):
             )
 
             self.logger.info(f"Taking screenshots of {len(live_urls)} URLs...")
-            await self.runner.run(command=cmd, timeout=self.timeout * len(live_urls))
+            timeout_val = min(300, max(30, len(live_urls) * 5))
+            await self.runner.run(command=cmd, timeout=timeout_val)
 
             # Gowitness doesn't produce JSON for our DB — images are saved to the folder
             screenshot_dir = self.out_dir / "screenshots"
@@ -66,4 +69,4 @@ class ScreenshotModule(ReconModule):
         finally:
             Path(urls_file).unlink(missing_ok=True)
 
-        self.logger.module_complete(self.config.name)
+        self.logger.module_complete(self.config.name, duration=time.monotonic() - start)

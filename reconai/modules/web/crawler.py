@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from collections import deque
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -49,9 +50,13 @@ class CrawlerModule(ReconModule):
                 and urlparse(r["url"]).path in ("", "/")
             ]
 
+        if not start_urls and self.target:
+            start_urls = [self.target if self.target.startswith(("http://", "https://")) else f"https://{self.target}"]
+
         if not start_urls:
             return
 
+        start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{len(start_urls)} root URLs")
 
         max_depth = 2
@@ -66,7 +71,8 @@ class CrawlerModule(ReconModule):
             ]
             await asyncio.gather(*tasks, return_exceptions=True)
 
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)
 
     async def _crawl(
         self,

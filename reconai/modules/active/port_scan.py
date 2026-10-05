@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Coroutine
 
@@ -92,6 +93,11 @@ class PortScanModule(ReconModule):
             ips_records = self.db.get_ips(self.scan_id)
             hosts = [str(record["ip"]) for record in ips_records]
 
+        if not hosts and self.target:
+            clean = self.target.split("://")[-1].split("/")[0].split(":")[0]
+            if clean:
+                hosts = [clean]
+
         if not hosts:
             self.logger.debug("No hosts to scan — skipping port scan.", module=self.config.name)
             return
@@ -104,6 +110,7 @@ class PortScanModule(ReconModule):
         profile = SCAN_PROFILES.get(profile_name, SCAN_PROFILES["quick"])
         nmap_args: list[str] = list(profile["nmap_args"])
 
+        start = time.monotonic()
         self.logger.module_start(
             self.config.name,
             target=f"{len(hosts)} hosts with profile '{profile_name}'",
@@ -117,7 +124,8 @@ class PortScanModule(ReconModule):
         ]
         await asyncio.gather(*tasks, return_exceptions=True)
 
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)
 
     async def _scan_host(
         self,
@@ -163,7 +171,10 @@ class PortScanModule(ReconModule):
                         self.db.insert_port(_service_as_port(svc_rec))
 
                     # Schedule the async event emit safely from a sync context
-                    loop = asyncio.get_event_loop()
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop = asyncio.get_event_loop()
                     loop.call_soon_threadsafe(
                         _schedule_emit, loop, self._emit_port_event(port_rec, svc_rec, host)
                     )

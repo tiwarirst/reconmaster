@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from typing import Any
 
 import dns.asyncresolver
@@ -48,6 +49,7 @@ class SAASEnumModule(ReconModule):
         if "-" in base_keyword:
             keywords.add(base_keyword.replace("-", ""))
 
+        start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{domain} (keywords: {', '.join(keywords)})")
 
         resolver = dns.asyncresolver.Resolver()
@@ -74,7 +76,8 @@ class SAASEnumModule(ReconModule):
 
             await asyncio.gather(*tasks, return_exceptions=True)
 
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)
 
     async def _check_atlassian(
         self, resolver: dns.asyncresolver.Resolver, keyword: str

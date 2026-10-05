@@ -35,6 +35,7 @@ import asyncio
 import base64
 import json
 import re
+import time
 from typing import Any
 
 from reconai.core.database.models import (
@@ -119,6 +120,7 @@ class IAMAnalyzerModule(ReconModule):
             )
             return
 
+        start = time.monotonic()
         self.logger.module_start(
             self.config.name,
             target=f"{len(secret_findings)} credential findings to validate",
@@ -133,7 +135,8 @@ class IAMAnalyzerModule(ReconModule):
             await self._analyse_gcp_credentials(full_text, finding)
             await self._analyse_azure_credentials(full_text, finding)
 
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)
 
     # ── AWS Credential Validation ─────────────────────────────────────────
 

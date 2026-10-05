@@ -30,6 +30,7 @@ import asyncio
 import json
 import re
 import socket
+import time
 from typing import Any
 
 try:
@@ -127,6 +128,7 @@ class CloudEnumModule(ReconModule):
     )
 
     async def run(self, **kwargs: Any) -> Any:
+        start = time.monotonic()
         self.logger.module_start(self.config.name, target=self.target)
 
         # Step 1: CNAME-based cloud detection (pure Python, no external tools)
@@ -135,7 +137,8 @@ class CloudEnumModule(ReconModule):
         # Step 2: Run external cloud_enum tool if available
         await self._run_cloud_enum_tool()
 
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)
 
     async def _detect_from_cnames(self) -> None:
         """Cross-reference all discovered CNAME records against cloud fingerprints."""

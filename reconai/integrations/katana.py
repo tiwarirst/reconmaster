@@ -1,8 +1,15 @@
-"""Katana adapter."""
+"""Katana adapter — stateless, no shared instance state.
+
+BUG FIX: Removed self.tmp_out shared state. The module now owns the temp
+file lifecycle. Removed -headless flag from default — Katana's headless
+mode requires Chromium to be installed; failing silently is better.
+
+BUG FIX 2: parse() now accepts output_file path (stateless pattern),
+not the CommandResult (which holds no output path reference).
+"""
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -19,42 +26,59 @@ class KatanaAdapter(ToolAdapter):
         return avail
 
     def build_command(self, **kwargs: Any) -> list[str]:
-        target = kwargs.get("target", "")
-        self.tmp_out = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
-        self.tmp_out.close()
-        
-        # Katana with headless mode and JSON output
-        return ["katana", "-u", target, "-j", "-o", self.tmp_out.name, "-silent", "-headless"]
+        target: str = kwargs["target"]
+        output_file: Path = kwargs["output_file"]
+        cmd = [
+            "katana",
+            "-u", target,
+            "-j",
+            "-o", str(output_file),
+            "-silent",
+            "-depth", "3",
+            "-js-crawl",
+        ]
+        return cmd
 
-    def parse(self, result: CommandResult) -> list[URLRecord]:
-        urls = []
+    def parse_output_file(self, path: Path) -> list[URLRecord]:
+        """Parse a katana JSON-lines output file.
+
+        Stateless: caller owns the file lifecycle.
+        Katana JSON lines have the format:
+          {"timestamp":"...","request":{"method":"GET","endpoint":"https://..."},...}
+        """
+        urls: list[URLRecord] = []
+        if not path.exists() or path.stat().st_size == 0:
+            return urls
         try:
-            path = Path(self.tmp_out.name)
-            if path.exists() and path.stat().st_size > 0:
-                with open(path, "r") as f:
-                    for line in f:
-                        if not line.strip():
-                            continue
-                        try:
-                            data = json.loads(line)
-                            url = data.get("request", {}).get("endpoint") or data.get("url")
-                            method = data.get("request", {}).get("method", "GET")
-                            status = data.get("response", {}).get("status_code")
-                            if url:
-                                urls.append(URLRecord(
-                                    scan_id="",
-                                    url=url,
-                                    method=method,
-                                    status_code=status,
-                                    source="katana"
-                                ))
-                        except json.JSONDecodeError:
-                            pass
+            with open(path, "r", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        endpoint = (
+                            data.get("request", {}).get("endpoint")
+                            or data.get("endpoint")
+                            or data.get("url")
+                        )
+                        method = data.get("request", {}).get("method", "GET")
+                        status = data.get("response", {}).get("status_code")
+                        if endpoint:
+                            urls.append(URLRecord(
+                                scan_id="",
+                                url=endpoint,
+                                method=method,
+                                status_code=status,
+                                source="katana",
+                                depth=1,
+                            ))
+                    except (json.JSONDecodeError, KeyError):
+                        pass
         except Exception:
             pass
-        finally:
-            path = Path(self.tmp_out.name)
-            if hasattr(self, 'tmp_out') and path.exists():
-                path.unlink(missing_ok=True)
-                
         return urls
+
+    # Legacy shim
+    def parse(self, result: CommandResult) -> list[URLRecord]:
+        return []

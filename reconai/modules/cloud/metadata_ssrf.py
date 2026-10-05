@@ -33,6 +33,7 @@ WHAT IT SAVES:
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 from urllib.parse import quote, urlencode, urljoin, urlparse
 
@@ -166,6 +167,7 @@ class MetadataSSRFModule(ReconModule):
             )
             return
 
+        start = time.monotonic()
         self.logger.module_start(
             self.config.name,
             target=f"{len(candidate_urls)} parameterized URLs",
@@ -183,7 +185,8 @@ class MetadataSSRFModule(ReconModule):
             ]
             await asyncio.gather(*tasks, return_exceptions=True)
 
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)
 
     async def _test_url_for_ssrf(
         self,

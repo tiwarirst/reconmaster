@@ -12,6 +12,7 @@ Zero external API keys or subscriptions required — uses standard asynchronous 
 from __future__ import annotations
 
 import re
+import time
 from typing import Any
 
 import dns.asyncresolver
@@ -57,6 +58,7 @@ class EmailSecurityModule(ReconModule):
         if not domains:
             return
 
+        start = time.monotonic()
         self.logger.module_start(self.config.name, target=", ".join(domains[:3]))
 
         resolver = dns.asyncresolver.Resolver()
@@ -66,7 +68,8 @@ class EmailSecurityModule(ReconModule):
         for domain in domains:
             await self._audit_domain_email_security(resolver, domain)
 
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)
 
     async def _audit_domain_email_security(
         self, resolver: dns.asyncresolver.Resolver, domain: str

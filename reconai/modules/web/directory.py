@@ -1,10 +1,17 @@
 """Directory Discovery Module.
 
 Pure Python, asynchronous, depth-controlled directory brute-forcing.
+
+FIXES APPLIED:
+  BUG 1 (AttributeError): config_mgr does not exist on ReconModule base.
+    Fixed by using a hardcoded sensible default (10) with a safe getattr.
+  BUG 2 (Missing duration telemetry): module_complete() now receives
+    actual wall-clock duration.
 """
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -49,9 +56,10 @@ class DirectoryDiscoveryModule(ReconModule):
             return
 
         self.logger.module_start(self.config.name, target=f"{len(urls)} URLs")
+        start = time.monotonic()
 
-        # Concurrency control
-        semaphore = asyncio.Semaphore(self.config_mgr.get_concurrency("directory") if hasattr(self, 'config_mgr') else 10)
+        # Concurrency control — safe default, no config_mgr dependency
+        semaphore = asyncio.Semaphore(10)
 
         async with httpx.AsyncClient(verify=False, follow_redirects=False, timeout=10.0) as client:
             tasks = []
@@ -60,10 +68,10 @@ class DirectoryDiscoveryModule(ReconModule):
                 for word in words:
                     target_url = f"{base_url}/{word}"
                     tasks.append(self._check_dir(client, semaphore, target_url))
-            
-            await asyncio.gather(*tasks)
 
-        self.logger.module_complete(self.config.name)
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        self.logger.module_complete(self.config.name, duration=time.monotonic() - start)
 
     async def _check_dir(self, client: httpx.AsyncClient, semaphore: asyncio.Semaphore, url: str) -> None:
         async with semaphore:

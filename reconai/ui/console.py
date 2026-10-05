@@ -9,8 +9,19 @@ Provides a unified interface for all terminal output:
 """
 from __future__ import annotations
 
+import sys
 from datetime import datetime
 from typing import Any
+
+# Ensure stdout and stderr handle UTF-8 cleanly on Windows terminals
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 from rich.console import Console
 from rich.panel import Panel
@@ -67,7 +78,17 @@ class ReconConsole:
         banner_text.append("║   Modular Reconnaissance & Attack-Surface Intelligence    ║\n", style="dim cyan")
         banner_text.append("║   v1.0.0                                                  ║\n", style="dim")
         banner_text.append("╚═══════════════════════════════════════════════════════════╝", style="bold cyan")
-        self._console.print(banner_text)
+        try:
+            self._console.print(banner_text)
+        except (UnicodeEncodeError, Exception):
+            ascii_fallback = (
+                "+-----------------------------------------------------------+\n"
+                "|   RECONAI - Attack Surface Intelligence Platform          |\n"
+                "|   Modular Reconnaissance & Attack-Surface Intelligence    |\n"
+                "|   v1.0.0                                                  |\n"
+                "+-----------------------------------------------------------+"
+            )
+            self._console.print(ascii_fallback, style="bold cyan")
         self._console.print()
 
     def _timestamp(self) -> str:

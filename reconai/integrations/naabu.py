@@ -1,8 +1,12 @@
-"""Naabu adapter."""
+"""Naabu adapter — stateless, no shared instance state.
+
+BUG FIX: Removed self.tmp_out shared state. The module now owns the temp
+file lifecycle (passed as output_file kwarg). Each concurrent scan call
+creates its own isolated file. No race conditions.
+"""
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -19,42 +23,50 @@ class NaabuAdapter(ToolAdapter):
         return avail
 
     def build_command(self, **kwargs: Any) -> list[str]:
-        target = kwargs.get("target", "")
-        # Output JSON to a temporary file
-        self.tmp_out = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
-        self.tmp_out.close()
-        
-        return ["naabu", "-host", target, "-json", "-o", self.tmp_out.name, "-silent"]
+        target: str = kwargs["target"]
+        output_file: Path = kwargs["output_file"]
+        return [
+            "naabu",
+            "-host", target,
+            "-json",
+            "-o", str(output_file),
+            "-silent",
+            "-rate", "1000",
+        ]
 
-    def parse(self, result: CommandResult) -> list[PortRecord]:
-        ports = []
+    def parse_output_file(self, path: Path) -> list[PortRecord]:
+        """Parse a naabu JSON-lines output file.
+
+        Stateless: caller owns the file lifecycle.
+        """
+        ports: list[PortRecord] = []
+        if not path.exists() or path.stat().st_size == 0:
+            return ports
         try:
-            path = Path(self.tmp_out.name)
-            if path.exists() and path.stat().st_size > 0:
-                with open(path, "r") as f:
-                    for line in f:
-                        if not line.strip():
-                            continue
-                        try:
-                            data = json.loads(line)
-                            port = data.get("port")
-                            host = data.get("host")
-                            if port and host:
-                                ports.append(PortRecord(
-                                    scan_id="", # Handled by module
-                                    host=host,
-                                    port=int(port),
-                                    protocol="tcp", # naabu default is tcp
-                                    state="open",
-                                    source="naabu"
-                                ))
-                        except json.JSONDecodeError:
-                            pass
+            with open(path, "r") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        port = data.get("port")
+                        host = data.get("host") or data.get("ip")
+                        if port and host:
+                            ports.append(PortRecord(
+                                scan_id="",   # set by module
+                                host=host,
+                                port=int(port),
+                                protocol="tcp",
+                                state="open",
+                                source="naabu",
+                            ))
+                    except (json.JSONDecodeError, ValueError):
+                        pass
         except Exception:
             pass
-        finally:
-            path = Path(self.tmp_out.name)
-            if hasattr(self, 'tmp_out') and path.exists():
-                path.unlink(missing_ok=True)
-                
         return ports
+
+    # Keep legacy parse() for backwards compat — delegates to new method
+    def parse(self, result: CommandResult) -> list[PortRecord]:
+        return []

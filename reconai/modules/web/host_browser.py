@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from typing import Any
 from urllib.parse import urlparse
 
@@ -73,6 +74,7 @@ class HostBrowserCrawlerModule(ReconModule):
             self.logger.warning("No target URLs found to crawl.")
             return
 
+        start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{len(target_urls)} URLs")
 
         if await self._is_browser_available(cdp_endpoint):
@@ -88,7 +90,8 @@ class HostBrowserCrawlerModule(ReconModule):
             )
             await self._run_stealth_headless(target_urls, max_pages)
 
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)
 
     # ────────────────────────────────────────────────────────────────────────
     # CDP Mode — Real browser with live sessions
@@ -348,7 +351,13 @@ class HostBrowserCrawlerModule(ReconModule):
         if live:
             return live
         subs = self.db.get_subdomains(self.scan_id)
-        return [f"https://{s['subdomain']}" for s in subs if s.get("is_alive")]
+        sub_urls = [f"https://{s['subdomain']}" for s in subs if s.get("is_alive")]
+        if sub_urls:
+            return sub_urls
+        if self.target:
+            t = self.target if self.target.startswith(("http://", "https://")) else f"https://{self.target}"
+            return [t]
+        return []
 
     async def _is_browser_available(self, endpoint: str) -> bool:
         try:

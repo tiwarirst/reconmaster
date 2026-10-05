@@ -6,12 +6,14 @@ Fix applied (BUG 1):
   Temp file is now owned by the module, not the adapter.
   Concurrent _fuzz_url() calls each get an independent output file.
   Added return_exceptions=True to asyncio.gather.
+  Added multi-wordlist discovery fallback and duration telemetry.
 """
 from __future__ import annotations
 
 import asyncio
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +42,9 @@ class FfufModule(ReconModule):
                 if r.get("status_code") == 200 and r.get("depth", 0) == 0
             ]
 
+        if not urls and self.target:
+            urls = [self.target if self.target.startswith(("http://", "https://")) else f"https://{self.target}"]
+
         if not urls:
             return
 
@@ -48,18 +53,26 @@ class FfufModule(ReconModule):
             self.logger.error("ffuf not available. Skipping directory fuzzing.", module=self.config.name)
             return
 
-        wordlist = "/usr/share/wordlists/dirb/common.txt"
-        if not os.path.exists(wordlist):
-            self.logger.error(f"Wordlist {wordlist} not found. Skipping ffuf.", module=self.config.name)
+        possible_wordlists = [
+            "/usr/share/wordlists/dirb/common.txt",
+            "/usr/share/wordlists/dirbuster/directory-list-2.3-small.txt",
+            "/usr/share/seclists/Discovery/Web-Content/common.txt",
+            "/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt",
+        ]
+        wordlist = next((w for w in possible_wordlists if os.path.exists(w)), "")
+        if not wordlist:
+            self.logger.warning("No standard wordlists found on system (/usr/share/wordlists/). Skipping ffuf.", module=self.config.name)
             return
 
+        start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{len(urls)} URLs")
 
         semaphore = asyncio.Semaphore(3)
         tasks = [self._fuzz_url(adapter, semaphore, url, wordlist) for url in urls]
         await asyncio.gather(*tasks, return_exceptions=True)
 
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)
 
     async def _fuzz_url(
         self,

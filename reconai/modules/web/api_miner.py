@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -80,6 +81,7 @@ class APIMinerModule(ReconModule):
             else:
                 live_urls.add(target)
 
+        start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{len(live_urls)} base host(s)")
 
         semaphore = asyncio.Semaphore(10)
@@ -95,7 +97,8 @@ class APIMinerModule(ReconModule):
             ]
             await asyncio.gather(*tasks, return_exceptions=True)
 
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)
 
     async def _mine_host(
         self,

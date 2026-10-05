@@ -5,6 +5,7 @@ Retrieves WHOIS information for domains to identify ownership and registration d
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 from reconai.core.events.types import EventType
@@ -23,19 +24,24 @@ class WhoisModule(ReconModule):
     )
 
     async def run(self, **kwargs: Any) -> Any:
-        domains = kwargs.get("domains", [])
+        domains = list(kwargs.get("domains", []))
+        if not domains and self.target:
+            clean = self.target.split("://")[-1].split("/")[0].split(":")[0]
+            if clean:
+                domains = [clean]
+
         if not domains:
             return
 
         for domain in domains:
+            start = time.monotonic()
             self.logger.module_start(self.config.name, target=domain)
-            
+
             result = await self.runner.run(["whois", domain], timeout=20)
             if result.succeeded and result.stdout:
-                # We don't store full WHOIS text in a dedicated table yet, 
-                # but we log it and emit an event.
+                # We log it and emit an event.
                 self.logger.info(f"WHOIS data retrieved for {domain}", module=self.config.name)
-                
+
                 await self.events.emit_discovery(
                     event_type=EventType.ASSET_DISCOVERED,
                     source=self.config.name,
@@ -43,5 +49,6 @@ class WhoisModule(ReconModule):
                     scan_id=self.scan_id,
                     target=self.target
                 )
-            
-            self.logger.module_complete(self.config.name)
+
+            duration = time.monotonic() - start
+            self.logger.module_complete(self.config.name, duration=duration)

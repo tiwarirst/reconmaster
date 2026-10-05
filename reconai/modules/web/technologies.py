@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -49,6 +50,9 @@ class TechnologyModule(ReconModule):
                 if r.get("status_code") and int(r["status_code"]) < 400
             ]
 
+        if not urls and self.target:
+            urls = [self.target if self.target.startswith(("http://", "https://")) else f"https://{self.target}"]
+
         if not urls:
             return
 
@@ -60,13 +64,15 @@ class TechnologyModule(ReconModule):
             )
             return
 
+        start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{len(urls)} URLs")
 
         semaphore = asyncio.Semaphore(5)
         tasks = [self._fingerprint_url(adapter, semaphore, url) for url in urls]
         await asyncio.gather(*tasks, return_exceptions=True)
 
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)
 
     async def _fingerprint_url(
         self,

@@ -5,8 +5,10 @@ Uses SQLMap to safely test discovered parameters for SQLi.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
+from reconai.core.events.types import EventType
 from reconai.integrations.sqlmap import SqlmapAdapter
 from reconai.modules.base import ModuleConfig, ReconModule
 from reconai.modules.registry import register_module
@@ -25,8 +27,11 @@ class SqlmapModule(ReconModule):
     async def run(self, **kwargs: Any) -> Any:
         # Only run on URLs that actually have parameters
         url_records = self.db.get_urls(self.scan_id)
-        urls = [r["url"] for r in url_records if "?" in r["url"] and "=" in r["url"]]
-        
+        urls = [
+            r["url"] for r in url_records
+            if "?" in r.get("url", "") and "=" in r.get("url", "")
+        ]
+
         if not urls:
             return
 
@@ -35,6 +40,7 @@ class SqlmapModule(ReconModule):
             self.logger.error("sqlmap not available. Skipping SQLi scan.", module=self.config.name)
             return
 
+        start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{len(urls)} parameterized URLs")
 
         # SQLMap is heavy, limit concurrency
@@ -42,19 +48,31 @@ class SqlmapModule(ReconModule):
         tasks = [self._test_sqli(adapter, semaphore, url) for url in urls[:10]] # Safety limit
         await asyncio.gather(*tasks, return_exceptions=True)
 
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)
 
     async def _test_sqli(self, adapter: SqlmapAdapter, semaphore: asyncio.Semaphore, url: str) -> None:
         async with semaphore:
             try:
                 cmd = adapter.build_command(target=url)
                 result = await self.runner.run(command=cmd, timeout=300)
-                
+
                 findings = adapter.parse(result, target_url=url)
-                
+
                 for finding in findings:
                     finding.scan_id = self.scan_id
                     self.db.insert_finding(finding)
-                        
+                    await self.events.emit_discovery(
+                        event_type=EventType.FINDING_DISCOVERED,
+                        source=self.config.name,
+                        data={
+                            "title": finding.title,
+                            "severity": finding.severity.value,
+                            "asset": finding.affected_asset,
+                        },
+                        scan_id=self.scan_id,
+                        target=self.target,
+                    )
+
             except Exception as e:
-                self.logger.debug(f"SQLMap scan failed for {url}: {e}")
+                self.logger.debug(f"SQLMap scan failed for {url}: {e}", module=self.config.name)

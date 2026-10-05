@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import time
 from typing import Any
 
 import dns.asyncresolver
@@ -43,6 +44,7 @@ class DNSEnumModule(ReconModule):
         resolver.lifetime = 5.0
 
         records_to_check = ["A", "AAAA", "CNAME", "MX", "NS", "TXT", "SOA", "CAA"]
+        start = time.monotonic()
 
         for domain in domains:
             self.logger.module_start(self.config.name, target=domain)
@@ -91,7 +93,7 @@ class DNSEnumModule(ReconModule):
                             target=self.target,
                         )
 
-            self.logger.module_complete(self.config.name)
+            self.logger.module_complete(self.config.name, duration=time.monotonic() - start)
 
     async def _query_record(
         self,

@@ -5,6 +5,7 @@ Uses ParamSpider to find URLs with parameters for injection testing.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 from reconai.core.database.models import URLRecord
@@ -25,7 +26,12 @@ class ParamspiderModule(ReconModule):
     )
 
     async def run(self, **kwargs: Any) -> Any:
-        domains = kwargs.get("domains", [])
+        domains = list(kwargs.get("domains", []))
+        if not domains and self.target:
+            clean = self.target.split("://")[-1].split("/")[0].split(":")[0]
+            if clean:
+                domains = [clean]
+
         if not domains:
             return
 
@@ -35,12 +41,13 @@ class ParamspiderModule(ReconModule):
             return
 
         for domain in domains:
+            start = time.monotonic()
             self.logger.module_start(self.config.name, target=domain)
-            
+
             cmd = adapter.build_command(domain=domain)
             result = await self.runner.run(command=cmd, timeout=300)
             urls = adapter.parse(result, domain=domain)
-            
+
             for u in urls:
                 record = URLRecord(
                     scan_id=self.scan_id,
@@ -49,7 +56,7 @@ class ParamspiderModule(ReconModule):
                     source="paramspider"
                 )
                 self.db.insert_url(record)
-                
+
                 await self.events.emit_discovery(
                     event_type=EventType.URL_DISCOVERED,
                     source=self.config.name,
@@ -57,6 +64,7 @@ class ParamspiderModule(ReconModule):
                     scan_id=self.scan_id,
                     target=self.target
                 )
-                
+
             self.logger.info(f"Discovered {len(urls)} parameterized URLs for {domain}", module=self.config.name)
-            self.logger.module_complete(self.config.name)
+            duration = time.monotonic() - start
+            self.logger.module_complete(self.config.name, duration=duration)

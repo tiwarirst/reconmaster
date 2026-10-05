@@ -15,9 +15,11 @@ or a direct Origin host. Updates IP records in the database with provider tags.
 from __future__ import annotations
 
 import ipaddress
+import time
 from typing import Any
 
 from reconai.core.database.models import TechnologyRecord
+from reconai.core.events.types import EventType
 from reconai.modules.base import ModuleConfig, ReconModule
 from reconai.modules.registry import register_module
 
@@ -68,6 +70,7 @@ class CDNClassifierModule(ReconModule):
         if not ip_records:
             return
 
+        start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{len(ip_records)} IP(s)")
 
         cdn_count = 0
@@ -110,6 +113,13 @@ class CDNClassifierModule(ReconModule):
                     evidence=[f"IP {ip_str} matches known {matched_cdn} CIDR range"],
                 )
                 self.db.insert_technology(tech)
+                await self.events.emit_discovery(
+                    event_type=EventType.TECHNOLOGY_DETECTED,
+                    source=self.config.name,
+                    data={"ip": ip_str, "technology": tech.name},
+                    scan_id=self.scan_id,
+                    target=self.target,
+                )
 
                 # Update IP record asn_org with the CDN provider if currently unset
                 try:
@@ -127,4 +137,5 @@ class CDNClassifierModule(ReconModule):
             f"[CDN] Classification complete: {cdn_count} CDN Edge IP(s), {origin_count} Direct Origin IP(s)",
             module=self.config.name,
         )
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)

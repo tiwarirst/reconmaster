@@ -3,14 +3,16 @@
 Quickly checks if discovered subdomains have active web services.
 
 Fixes applied:
-  - Flaw 9: `import re` was inside the inner hot loop — a sys.modules dict
-    lookup on every single HTTP response. Moved to module level, compiled
-    once as a constant.
+  - Flaw 9: `import re` was inside the inner hot loop — moved to module level,
+    compiled once as a constant.
+  - Added duration telemetry to module_complete().
+  - Added target fallback if no subdomains were discovered.
 """
 from __future__ import annotations
 
 import asyncio
 import re
+import time
 from typing import Any
 
 import httpx
@@ -40,9 +42,15 @@ class HTTPProbeModule(ReconModule):
             subs = self.db.get_subdomains(self.scan_id)
             hosts = [str(s["subdomain"]) for s in subs]
 
+        if not hosts and self.target:
+            clean = self.target.split("://")[-1].split("/")[0].split(":")[0]
+            if clean:
+                hosts = [clean]
+
         if not hosts:
             return
 
+        start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{len(hosts)} hosts")
 
         semaphore = asyncio.Semaphore(20)
@@ -53,7 +61,8 @@ class HTTPProbeModule(ReconModule):
             tasks = [self._probe_host(client, semaphore, host) for host in hosts]
             await asyncio.gather(*tasks, return_exceptions=True)
 
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)
 
     async def _probe_host(
         self,

@@ -14,6 +14,7 @@ custom 404 / 200 catch-all HTML pages. Zero external cost.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -22,6 +23,7 @@ import httpx
 from reconai.core.database.models import (
     Confidence, FindingRecord, FindingStatus, Severity,
 )
+from reconai.core.events.types import EventType
 from reconai.modules.base import ModuleConfig, ReconModule
 from reconai.modules.registry import register_module
 
@@ -129,6 +131,7 @@ class DevArtifactsModule(ReconModule):
             else:
                 live_urls.add(target)
 
+        start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{len(live_urls)} web host(s)")
 
         semaphore = asyncio.Semaphore(10)
@@ -144,7 +147,8 @@ class DevArtifactsModule(ReconModule):
             ]
             await asyncio.gather(*tasks, return_exceptions=True)
 
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)
 
     async def _check_host_artifacts(
         self,
@@ -201,6 +205,17 @@ class DevArtifactsModule(ReconModule):
                         prevention="Implement strict web server access control rules denying hidden files and administrative paths.",
                     )
                     self.db.insert_finding(finding)
+                    await self.events.emit_discovery(
+                        event_type=EventType.FINDING_DISCOVERED,
+                        source=self.config.name,
+                        data={
+                            "title": finding.title,
+                            "severity": finding.severity.value,
+                            "asset": finding.affected_asset,
+                        },
+                        scan_id=self.scan_id,
+                        target=self.target,
+                    )
 
                 except Exception:
                     continue

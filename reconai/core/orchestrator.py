@@ -252,11 +252,12 @@ def _build_module_kwargs(target: str) -> dict[str, Any]:
     else:
         raw = target
 
-    # Strip path and fragment
-    domain = raw.split("/")[0].split("#")[0].split("?")[0]
+    # Strip path, fragment, and port
+    domain = raw.split("/")[0].split("#")[0].split("?")[0].split(":")[0]
 
     return {
         "target":  target,
         "domain":  domain,
         "domains": [domain],
+        "hosts":   [domain],
     }

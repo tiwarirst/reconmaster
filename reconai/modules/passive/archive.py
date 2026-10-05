@@ -5,6 +5,7 @@ Uses waybackurls to fetch historical URLs passively.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 from urllib.parse import urlparse
 
@@ -26,7 +27,12 @@ class ArchiveModule(ReconModule):
     )
 
     async def run(self, **kwargs: Any) -> Any:
-        domains = kwargs.get("domains", [])
+        domains = list(kwargs.get("domains", []))
+        if not domains and self.target:
+            clean = self.target.split("://")[-1].split("/")[0].split(":")[0]
+            if clean:
+                domains = [clean]
+
         if not domains:
             return
 
@@ -36,19 +42,20 @@ class ArchiveModule(ReconModule):
             return
 
         for domain in domains:
+            start = time.monotonic()
             self.logger.module_start(self.config.name, target=domain)
-            
+
             cmd = adapter.build_command(domain=domain)
             result = await self.runner.run(command=cmd, timeout=300)
             urls = adapter.parse(result)
-            
+
             # Deduplicate by path/query structure
             unique_urls = set()
             for u in urls:
                 parsed = urlparse(u)
                 if parsed.netloc.endswith(domain):
                     unique_urls.add(u)
-                    
+
             for u in unique_urls:
                 record = URLRecord(
                     scan_id=self.scan_id,
@@ -57,15 +64,15 @@ class ArchiveModule(ReconModule):
                     source="waybackurls"
                 )
                 self.db.insert_url(record)
-                
+
                 await self.events.emit_discovery(
                     event_type=EventType.URL_DISCOVERED,
                     source=self.config.name,
                     data={"url": u, "status": 0},
                     scan_id=self.scan_id,
-
                     target=self.target
                 )
-                
+
             self.logger.info(f"Discovered {len(unique_urls)} historical URLs for {domain}", module=self.config.name)
-            self.logger.module_complete(self.config.name)
+            duration = time.monotonic() - start
+            self.logger.module_complete(self.config.name, duration=duration)

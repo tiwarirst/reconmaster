@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from typing import Any
 from urllib.parse import urlparse
 
@@ -102,6 +103,7 @@ class BucketEnumModule(ReconModule):
             pass
 
         names = _generate_permutations(domain)
+        start = time.monotonic()
         self.logger.module_start(
             self.config.name, target=f"{domain} ({len(names)} candidates)"
         )
@@ -119,7 +121,8 @@ class BucketEnumModule(ReconModule):
             ]
             await asyncio.gather(*tasks, return_exceptions=True)
 
-        self.logger.module_complete(self.config.name)
+        duration = time.monotonic() - start
+        self.logger.module_complete(self.config.name, duration=duration)
 
     async def _probe_all_providers(
         self,
