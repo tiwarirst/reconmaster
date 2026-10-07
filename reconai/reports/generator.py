@@ -84,9 +84,33 @@ class ReportGenerator:
             f"| Cloud Assets | {stats.get('cloud_assets', 0)} |",
             f"| Findings | {stats.get('findings', 0)} |",
             "",
-            "## Findings",
+            "## Correlated Asset Attack Surface",
             "",
         ]
+
+        correlation = CorrelationEngine(self.db, self.scan_id)
+        chains = correlation.get_correlated_chains()
+        if chains:
+            for ch in chains[:25]:
+                ips_str = ", ".join(ch["ips"]) if ch["ips"] else "N/A"
+                ports_str = ", ".join(ch["ports"]) if ch["ports"] else "None"
+                tech_str = ", ".join(ch["technologies"]) if ch["technologies"] else "None"
+                lines.append(f"### 🌐 {ch['host']}")
+                lines.append(f"- **Resolved IPs:** `{ips_str}`")
+                lines.append(f"- **Open Ports:** {ports_str}")
+                lines.append(f"- **Technologies:** {tech_str}")
+                if ch["findings"]:
+                    lines.append("- **Correlated Findings:**")
+                    for f in ch["findings"]:
+                        lines.append(f"  - `[{f['severity'].upper()}]` {f['title']}")
+                lines.append("")
+        else:
+            lines.append("No correlated attack chains discovered.\n")
+
+        lines.extend([
+            "## Findings",
+            "",
+        ])
 
         if not findings:
             lines.append("No security findings discovered.")
@@ -164,6 +188,54 @@ class ReportGenerator:
         else:
             lines.append("No cloud assets or storage buckets discovered.")
 
+        # Crawled URLs section
+        urls = self.db.get_urls(self.scan_id)
+        lines.extend([
+            "",
+            f"### Crawled Web Endpoints & URLs ({len(urls)})",
+            "",
+        ])
+        if urls:
+            lines.append("| Method | Status | URL | Source |")
+            lines.append("|--------|--------|-----|--------|")
+            for u in urls[:60]:
+                status = u.get("status_code") or "—"
+                method = u.get("method") or "GET"
+                lines.append(f"| {method} | {status} | {u.get('url')} | {u.get('source')} |")
+            if len(urls) > 60:
+                lines.append(f"\n*... and {len(urls) - 60} more URLs in report.json and csv/urls.csv*")
+        else:
+            lines.append("No web URLs crawled.")
+
+        # API Endpoints section
+        apis = self.db.get_api_endpoints(self.scan_id)
+        lines.extend([
+            "",
+            f"### Discovered API Endpoints ({len(apis)})",
+            "",
+        ])
+        if apis:
+            lines.append("| Method | Path | Host | Source |")
+            lines.append("|--------|------|------|--------|")
+            for a in apis[:50]:
+                lines.append(f"| {a.get('method') or 'GET'} | {a.get('path')} | {a.get('host')} | {a.get('source')} |")
+        else:
+            lines.append("No API endpoints detected.")
+
+        # Visual Screenshots section
+        screenshots_dir = self.output_dir / "screenshots"
+        png_files = list(screenshots_dir.rglob("*.png")) if screenshots_dir.exists() else []
+        lines.extend([
+            "",
+            f"### Visual Screenshots Captured ({len(png_files)})",
+            "",
+        ])
+        if png_files:
+            for p in png_files:
+                lines.append(f"- `{p.name}` (Saved to: `{p}`)")
+        else:
+            lines.append("No screenshots captured.")
+
         out_file = self.reports_dir / "report.md"
         with open(out_file, "w", encoding="utf-8") as fp:
             fp.write("\n".join(lines))
@@ -211,7 +283,18 @@ class ReportGenerator:
                 writer.writerow(s)
         csv_files["subdomains"] = subs_path
 
-        # 4. API Endpoints CSV
+        # 4. URLs CSV
+        urls_path = csv_dir / "urls.csv"
+        urls = self.db.get_urls(self.scan_id)
+        u_fields = ["url", "method", "status_code", "content_type", "content_length", "title", "source", "depth"]
+        with open(urls_path, "w", newline="", encoding="utf-8") as fp:
+            writer = csv.DictWriter(fp, fieldnames=u_fields, extrasaction="ignore")
+            writer.writeheader()
+            for u in urls:
+                writer.writerow(u)
+        csv_files["urls"] = urls_path
+
+        # 5. API Endpoints CSV
         api_path = csv_dir / "api_endpoints.csv"
         apis = self.db.get_api_endpoints(self.scan_id)
         a_fields = ["host", "method", "path", "full_url", "api_type", "auth_required", "source"]
@@ -222,7 +305,7 @@ class ReportGenerator:
                 writer.writerow(a)
         csv_files["api_endpoints"] = api_path
 
-        # 5. Ports CSV
+        # 6. Ports CSV
         ports_path = csv_dir / "ports.csv"
         ports = self.db.get_ports(self.scan_id)
         p_fields = ["host", "port", "protocol", "state", "service", "product", "version"]

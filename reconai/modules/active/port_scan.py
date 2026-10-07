@@ -80,8 +80,8 @@ class PortScanModule(ReconModule):
     config = ModuleConfig(
         name="ports",
         category="active",
-        description="Port scanning and service detection using Nmap (fault-tolerant, zero data loss)",
-        requires_tools=["nmap"],
+        description="Port scanning and service detection using Nmap (with async TCP connect fallback)",
+        requires_tools=[],
         supports_timeout=True,
     )
 
@@ -103,12 +103,7 @@ class PortScanModule(ReconModule):
             return
 
         adapter = NmapAdapter(self.runner)
-        if not await adapter.is_available():
-            self.logger.error("Nmap not available. Skipping port scan.", module=self.config.name)
-            return
-
-        profile = SCAN_PROFILES.get(profile_name, SCAN_PROFILES["quick"])
-        nmap_args: list[str] = list(profile["nmap_args"])
+        nmap_available = await adapter.is_available()
 
         start = time.monotonic()
         self.logger.module_start(
@@ -116,13 +111,28 @@ class PortScanModule(ReconModule):
             target=f"{len(hosts)} hosts with profile '{profile_name}'",
         )
 
-        # Concurrency limit: Nmap is already internally parallel, so cap low.
-        semaphore = asyncio.Semaphore(2)
-        tasks = [
-            self._scan_host(adapter, semaphore, host, nmap_args)
-            for host in hosts
-        ]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        if nmap_available:
+            profile = SCAN_PROFILES.get(profile_name, SCAN_PROFILES["quick"])
+            nmap_args: list[str] = list(profile["nmap_args"])
+
+            semaphore = asyncio.Semaphore(2)
+            tasks = [
+                self._scan_host(adapter, semaphore, host, nmap_args)
+                for host in hosts[:10]
+            ]
+            await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            self.record_warning(
+                "Nmap not installed in PATH. Install: 'sudo apt install nmap' (Windows: 'winget install Insecure.Nmap'). "
+                "Ran pure-Python async TCP connect port scanning fallback."
+            )
+            await self._python_tcp_scan(hosts[:10])
+
+        # Verify if any ports were discovered. If 0 found (e.g. host blocks ping), verify web ports 80/443
+        discovered_ports = self.db.get_ports(self.scan_id)
+        if not discovered_ports:
+            self.logger.info("Verifying standard web ports via direct socket connect...", module=self.config.name)
+            await self._python_tcp_scan(hosts[:5], ports_to_check=[80, 443, 8080, 8443])
 
         duration = time.monotonic() - start
         self.logger.module_complete(self.config.name, duration=duration)
@@ -313,6 +323,59 @@ class PortScanModule(ReconModule):
                 scan_id=self.scan_id,
                 target=self.target,
             )
+
+    async def _python_tcp_scan(
+        self, hosts: list[str], ports_to_check: list[int] | None = None
+    ) -> None:
+        """Pure-Python async TCP connect scan fallback."""
+        ports = ports_to_check or [
+            80, 443, 8080, 8443, 22, 21, 25, 53, 3306, 5432, 8000, 8888, 3000, 5000, 8081, 9000
+        ]
+        service_map = {
+            80: "http", 443: "https", 8080: "http-proxy", 8443: "https-alt",
+            22: "ssh", 21: "ftp", 25: "smtp", 53: "domain", 3306: "mysql",
+            5432: "postgresql", 8000: "http-alt", 8888: "http-alt",
+            3000: "node-http", 5000: "flask-http", 8081: "http-alt", 9000: "http-alt"
+        }
+        semaphore = asyncio.Semaphore(20)
+
+        async def _check_host_port(host: str, port: int) -> None:
+            async with semaphore:
+                try:
+                    conn = asyncio.open_connection(host, port)
+                    reader, writer = await asyncio.wait_for(conn, timeout=2.5)
+                    writer.close()
+                    await writer.wait_closed()
+
+                    svc = service_map.get(port, "unknown")
+                    record = PortRecord(
+                        scan_id=self.scan_id,
+                        host=host,
+                        port=port,
+                        protocol="tcp",
+                        state="open",
+                        service=svc,
+                        source="python_connect",
+                    )
+                    self.db.insert_port(record)
+
+                    await self.events.emit_discovery(
+                        event_type=EventType.PORT_DISCOVERED,
+                        source=self.config.name,
+                        data={"host": host, "port": port, "protocol": "tcp", "service": svc},
+                        scan_id=self.scan_id,
+                        target=self.target,
+                    )
+                except Exception:
+                    pass
+
+        tasks = [
+            _check_host_port(host, port)
+            for host in hosts
+            for port in ports
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
 
 
 def _timeout_for_args(args: list[str]) -> int:

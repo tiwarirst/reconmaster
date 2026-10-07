@@ -15,6 +15,7 @@ import asyncio
 import os
 import re
 import shutil
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -26,8 +27,10 @@ from reconai.core.executor.stream_handler import StreamHandler
 from reconai.core.executor.timeout_manager import TimeoutManager
 
 
-# Characters that should never appear in command arguments
-_DANGEROUS_CHARS = re.compile(r'[;&|`$(){}\[\]<>!\\]')
+# Characters that should never appear in command arguments (shell injection / chaining)
+# Note: Backslashes (\) are standard Windows path separators, brackets ([]) are common in port ranges / IPv6,
+# and parentheses are common in flags/user-agents/code.
+_DANGEROUS_CHARS = re.compile(r'[;&|`$<>!\n\r]')
 
 
 class CommandRunner:
@@ -41,6 +44,11 @@ class CommandRunner:
             output_file=Path("output/nmap.txt"),
         )
     """
+
+    @staticmethod
+    def is_safe(arg: str) -> bool:
+        """Check if an argument contains shell injection or command chaining characters."""
+        return not bool(_DANGEROUS_CHARS.search(str(arg)))
 
     def __init__(
         self,

@@ -36,8 +36,8 @@ class DnsxModule(ReconModule):
     config = ModuleConfig(
         name="dnsx",
         category="passive",
-        description="High-speed wildcard-aware DNS resolution using DNSx",
-        requires_tools=["dnsx"],
+        description="High-speed wildcard-aware DNS resolution using DNSx (with async Python fallback)",
+        requires_tools=[],
         supports_timeout=True,
     )
 
@@ -55,10 +55,11 @@ class DnsxModule(ReconModule):
 
         adapter = DnsxAdapter(self.runner)
         if not await adapter.is_available():
-            self.logger.error(
-                "dnsx not available. Skipping high-speed DNS resolution.",
-                module=self.config.name,
+            self.record_warning(
+                "DNSx not installed in PATH. Install: 'go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest'. "
+                "Ran async Python DNS resolver fallback."
             )
+            await self._python_dns_resolve(subdomains)
             return
 
         start = time.monotonic()
@@ -133,6 +134,63 @@ class DnsxModule(ReconModule):
 
         duration = time.monotonic() - start
         self.logger.module_complete(self.config.name, duration=duration)
+
+    async def _python_dns_resolve(self, subdomains: list[str]) -> None:
+        """Pure-Python async DNS resolver fallback when dnsx CLI is not installed."""
+        import dns.asyncresolver
+        from reconai.core.database.models import DNSRecord
+        import asyncio
+
+        resolver = dns.asyncresolver.Resolver()
+        resolver.timeout = 2.0
+        resolver.lifetime = 4.0
+        semaphore = asyncio.Semaphore(15)
+        resolved_count = 0
+
+        async def _resolve_host(sub: str) -> None:
+            nonlocal resolved_count
+            async with semaphore:
+                try:
+                    answers = await resolver.resolve(sub, "A")
+                    for rdata in answers:
+                        ip_str = rdata.to_text()
+                        dns_rec = DNSRecord(
+                            scan_id=self.scan_id,
+                            hostname=sub,
+                            record_type="A",
+                            value=ip_str,
+                            ttl=answers.ttl,
+                            source="python_dns",
+                        )
+                        self.db.insert_dns_record(dns_rec)
+
+                        ip_rec = IPRecord(
+                            scan_id=self.scan_id,
+                            ip=ip_str,
+                            version=_ip_version(ip_str),
+                            hostnames=[sub],
+                            is_private=_is_private(ip_str),
+                            source="python_dns",
+                        )
+                        self.db.insert_ip(ip_rec)
+
+                        await self.events.emit_discovery(
+                            event_type=EventType.HOST_RESOLVED,
+                            source=self.config.name,
+                            data={"domain": sub, "ip": ip_str, "version": ip_rec.version},
+                            scan_id=self.scan_id,
+                            target=self.target,
+                        )
+                        resolved_count += 1
+                except Exception:
+                    pass
+
+        tasks = [_resolve_host(sub) for sub in subdomains]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self.logger.info(
+            f"Resolved {resolved_count} IP records for {len(subdomains)} hostnames via Python DNS fallback",
+            module=self.config.name,
+        )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

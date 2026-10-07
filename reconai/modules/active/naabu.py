@@ -30,8 +30,8 @@ class NaabuPortScanModule(ReconModule):
     config = ModuleConfig(
         name="naabu_ports",
         category="active",
-        description="Extremely fast SYN port scanning using Naabu",
-        requires_tools=["naabu"],
+        description="Extremely fast SYN port scanning using Naabu (with TCP connect fallback)",
+        requires_tools=[],
         supports_timeout=True,
     )
 
@@ -41,22 +41,68 @@ class NaabuPortScanModule(ReconModule):
             ips_records = self.db.get_ips(self.scan_id)
             hosts = [record["ip"] for record in ips_records]
 
+        if not hosts and self.target:
+            clean = self.target.split("://")[-1].split("/")[0].split(":")[0]
+            if clean:
+                hosts = [clean]
+
         if not hosts:
             return
 
         adapter = NaabuAdapter(self.runner)
-        if not await adapter.is_available():
-            self.logger.error("Naabu not available. Skipping fast port scan.", module=self.config.name)
-            return
+        has_naabu = await adapter.is_available()
 
         self.logger.module_start(self.config.name, target=f"{len(hosts)} hosts")
         start = time.monotonic()
 
-        semaphore = asyncio.Semaphore(2)
-        tasks = [self._scan_host(adapter, semaphore, host) for host in hosts]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        if has_naabu:
+            semaphore = asyncio.Semaphore(2)
+            tasks = [self._scan_host(adapter, semaphore, host) for host in hosts[:10]]
+            await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            self.record_warning(
+                "Naabu not installed in PATH. Install: 'go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest'. "
+                "Ran built-in TCP socket probe fallback."
+            )
+            await self._fast_socket_probe(hosts[:10])
 
         self.logger.module_complete(self.config.name, duration=time.monotonic() - start)
+
+    async def _fast_socket_probe(self, hosts: list[str]) -> None:
+        """Fast TCP probe across top web and administration ports."""
+        from reconai.core.database.models import PortRecord
+        ports = [80, 443, 8080, 8443, 22, 3306, 5432, 8000]
+        semaphore = asyncio.Semaphore(15)
+
+        async def _check(host: str, port: int) -> None:
+            async with semaphore:
+                try:
+                    conn = asyncio.open_connection(host, port)
+                    _, writer = await asyncio.wait_for(conn, timeout=2.0)
+                    writer.close()
+                    await writer.wait_closed()
+                    rec = PortRecord(
+                        scan_id=self.scan_id,
+                        host=host,
+                        port=port,
+                        protocol="tcp",
+                        state="open",
+                        service="http" if port in (80, 8080, 8000) else "https" if port in (443, 8443) else "ssh" if port == 22 else "service",
+                        source="naabu_fallback",
+                    )
+                    self.db.insert_port(rec)
+                    await self.events.emit_discovery(
+                        event_type=EventType.PORT_DISCOVERED,
+                        source=self.config.name,
+                        data={"host": host, "port": port, "protocol": "tcp"},
+                        scan_id=self.scan_id,
+                        target=self.target,
+                    )
+                except Exception:
+                    pass
+
+        tasks = [_check(h, p) for h in hosts for p in ports]
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _scan_host(self, adapter: NaabuAdapter, semaphore: asyncio.Semaphore, host: str) -> None:
         async with semaphore:

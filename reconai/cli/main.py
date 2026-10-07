@@ -78,61 +78,177 @@ def cli(ctx: click.Context, debug: bool, verbose: bool, config: str | None) -> N
     ctx.obj["config_mgr"] = config_mgr
 
 
-@cli.command()
-@click.argument("target")
-@click.option("-m", "--mode", type=click.Choice(["passive", "light", "standard", "deep", "browser", "authenticated", "cloud"]), default="standard", help="Scan mode")
-@click.option("-p", "--profile", type=click.Choice(["quick", "standard", "service", "full"]), default="quick", help="Port scan profile")
-@click.option("--timeout", type=int, help="Global timeout override (seconds)")
-@click.option("--dry-run", is_flag=True, help="Show what would be run without executing")
-@click.option("--ai", is_flag=True, help="Use local Ollama LLM for AI-powered analysis")
-@click.pass_context
-def scan(ctx: click.Context, target: str, mode: str, profile: str, timeout: int | None, dry_run: bool, ai: bool) -> None:
-    """Run a reconnaissance scan against a target."""
+def _execute_pipeline(
+    ctx: click.Context,
+    target: str,
+    mode: str,
+    profile: str = "quick",
+    timeout: int | None = None,
+    dry_run: bool = False,
+    ai: bool = False,
+) -> None:
+    """Shared execution engine for all pipeline commands."""
     console: ReconConsole = ctx.obj["console"]
     config_mgr: ConfigManager = ctx.obj["config_mgr"]
-    
+
     if timeout:
         config_mgr.override(default_timeout=timeout)
 
+    from reconai.core.config.defaults import SCAN_MODES
+    mode_def = SCAN_MODES.get(mode, {})
+
     if dry_run:
-        from reconai.core.config.defaults import SCAN_MODES
-        mode_def = SCAN_MODES.get(mode, {})
         console.info(f"[DRY RUN] Target: {target}")
         console.info(f"[DRY RUN] Mode: {mode} — {mode_def.get('description', '')}")
         console.info(f"[DRY RUN] Profile: {profile}")
-        console.info(f"[DRY RUN] Modules to run:")
+        console.info(f"[DRY RUN] Modules to run ({len(mode_def.get('modules', []))} total):")
         for m in mode_def.get("modules", []):
             console.console.print(f"  [dim]  • {m}[/dim]")
         return
 
     scope = ScopeManager.for_target(target)
     orchestrator = Orchestrator(target, config_mgr, scope, console)
-    
+
     async def _run() -> None:
         await orchestrator.prepare_scan(mode=mode, profile=profile)
         await orchestrator.run()
-        
+
         # Generate Report
         console.info("Generating reports...")
         generator = ReportGenerator(orchestrator.db, orchestrator.scan_id, orchestrator.out_dir)
         reports = generator.generate_all()
         console.success(f"HTML report: {reports.get('html', '')}")
         console.success(f"All reports saved to: {reports['markdown'].parent}")
-        
-        # AI Analysis (optional)
-        if ai:
+
+        # AI Analysis (when requested or in deep/cloud/vuln mode)
+        if ai or mode in ("deep", "cloud", "vuln"):
             from reconai.ai.local import OllamaAdapter
             from reconai.ai.analyzer import Analyzer
             llm = OllamaAdapter()
             if await llm.is_available():
-                console.info("Running AI analysis...")
+                console.info(f"Running AI analysis with local LLM ('{llm.model}')...")
                 analyzer = Analyzer(llm, orchestrator.db, orchestrator.scan_id)
                 summary = await analyzer.summarize_findings()
-                console.console.print(f"\n[bold cyan]AI Summary:[/bold cyan]\n{summary}\n")
-            else:
-                console.warning("Ollama not available. Skipping AI analysis. Install with: curl -fsSL https://ollama.ai/install.sh | sh")
-        
+                console.console.print(f"\n[bold cyan]AI Summary ({llm.model}):[/bold cyan]\n{summary}\n")
+
+                # Persist AI report to reports directory
+                ai_file = orchestrator.out_dir / "reports" / "ai_analysis.md"
+                ai_file.write_text(f"# AI Threat Assessment: {target}\n\n**Model:** `{llm.model}`\n\n{summary}\n", encoding="utf-8")
+                console.success(f"AI Report saved to: {ai_file}")
+            elif ai:
+                console.warning(
+                    "Local LLM (Ollama) is not running or has no models installed. "
+                    "To enable AI analysis, download Ollama from https://ollama.com and run: ollama pull llama3"
+                )
+
     asyncio.run(_run())
+
+
+@cli.command()
+@click.argument("target")
+@click.option("-m", "--mode", type=click.Choice(["passive", "light", "standard", "deep", "browser", "authenticated", "cloud", "subs", "ports", "web", "vuln"]), default="standard", help="Scan mode")
+@click.option("-p", "--profile", type=click.Choice(["quick", "standard", "service", "full"]), default="quick", help="Port scan profile")
+@click.option("--timeout", type=int, help="Global timeout override (seconds)")
+@click.option("--dry-run", is_flag=True, help="Show what would be run without executing")
+@click.option("--ai", is_flag=True, help="Use local Ollama LLM for AI-powered analysis")
+@click.pass_context
+def scan(ctx: click.Context, target: str, mode: str, profile: str, timeout: int | None, dry_run: bool, ai: bool) -> None:
+    """Run an orchestrated reconnaissance scan against a target."""
+    _execute_pipeline(ctx, target, mode=mode, profile=profile, timeout=timeout, dry_run=dry_run, ai=ai)
+
+
+@cli.command()
+@click.argument("target")
+@click.option("--dry-run", is_flag=True, help="Show what would be run without executing")
+@click.option("--timeout", type=int, help="Global timeout override (seconds)")
+@click.pass_context
+def subs(ctx: click.Context, target: str, dry_run: bool, timeout: int | None) -> None:
+    """Dedicated Subdomain Intelligence Pipeline (DNS, CT logs, archive, DNSx, active tools)."""
+    _execute_pipeline(ctx, target, mode="subs", dry_run=dry_run, timeout=timeout)
+
+
+@cli.command()
+@click.argument("target")
+@click.option("-p", "--profile", type=click.Choice(["quick", "standard", "service", "full"]), default="quick", help="Port scan profile")
+@click.option("--dry-run", is_flag=True, help="Show what would be run without executing")
+@click.option("--timeout", type=int, help="Global timeout override (seconds)")
+@click.pass_context
+def ports(ctx: click.Context, target: str, profile: str, dry_run: bool, timeout: int | None) -> None:
+    """Dedicated Port & Service Detection Pipeline (DNS, Naabu, Nmap, TCP connect, CDN classifier)."""
+    _execute_pipeline(ctx, target, mode="ports", profile=profile, dry_run=dry_run, timeout=timeout)
+
+
+@cli.command()
+@click.argument("target")
+@click.option("--dry-run", is_flag=True, help="Show what would be run without executing")
+@click.option("--timeout", type=int, help="Global timeout override (seconds)")
+@click.pass_context
+def web(ctx: click.Context, target: str, dry_run: bool, timeout: int | None) -> None:
+    """Dedicated Web Attack Surface Pipeline (HTTP probe, tech stack, headers, WAF, crawl, dir, screenshot)."""
+    _execute_pipeline(ctx, target, mode="web", dry_run=dry_run, timeout=timeout)
+
+
+@cli.command()
+@click.argument("target")
+@click.option("--dry-run", is_flag=True, help="Show what would be run without executing")
+@click.option("--timeout", type=int, help="Global timeout override (seconds)")
+@click.option("--ai", is_flag=True, help="Use local Ollama LLM for AI-powered cloud risk analysis")
+@click.pass_context
+def cloud(ctx: click.Context, target: str, dry_run: bool, timeout: int | None, ai: bool) -> None:
+    """Dedicated Cloud Attack Surface Pipeline (S3/GCS/Azure buckets, CNAME takeovers, SaaS, SSRF)."""
+    _execute_pipeline(ctx, target, mode="cloud", dry_run=dry_run, timeout=timeout, ai=ai)
+
+
+@cli.command()
+@click.argument("target")
+@click.option("--dry-run", is_flag=True, help="Show what would be run without executing")
+@click.option("--timeout", type=int, help="Global timeout override (seconds)")
+@click.option("--ai", is_flag=True, help="Use local Ollama LLM for AI-powered exploit guidance")
+@click.pass_context
+def vuln(ctx: click.Context, target: str, dry_run: bool, timeout: int | None, ai: bool) -> None:
+    """Dedicated Vulnerability Pipeline (Nuclei, secrets, API miner, dev artifacts, Dalfox, SQLMap)."""
+    _execute_pipeline(ctx, target, mode="vuln", dry_run=dry_run, timeout=timeout, ai=ai)
+
+
+@cli.command()
+@click.argument("target_or_scan_id")
+@click.pass_context
+def ai(ctx: click.Context, target_or_scan_id: str) -> None:
+    """Dedicated AI Intelligence & Threat Assessment Pipeline."""
+    console: ReconConsole = ctx.obj["console"]
+    config_mgr: ConfigManager = ctx.obj["config_mgr"]
+    base_out = Path(config_mgr.config.output.base_dir)
+
+    # Check if target_or_scan_id is an existing scan directory
+    scan_dir = None
+    for path in base_out.rglob(target_or_scan_id):
+        if path.is_dir():
+            scan_dir = path
+            break
+
+    if scan_dir:
+        from reconai.core.database.manager import DatabaseManager
+        from reconai.ai.local import OllamaAdapter
+        from reconai.ai.analyzer import Analyzer
+        db = DatabaseManager(db_path=scan_dir / "reconai.db")
+        llm = OllamaAdapter()
+
+        async def _run_ai_on_scan() -> None:
+            if not await llm.is_available():
+                console.warning("Ollama is not running. Please start Ollama (https://ollama.com).")
+                return
+            analyzer = Analyzer(llm, db, target_or_scan_id)
+            summary = await analyzer.summarize_findings()
+            console.console.print(f"\n[bold cyan]AI Threat Assessment ({llm.model}):[/bold cyan]\n{summary}\n")
+            ai_file = scan_dir / "reports" / "ai_analysis.md"
+            ai_file.write_text(f"# AI Threat Assessment: {target_or_scan_id}\n\n**Model:** `{llm.model}`\n\n{summary}\n", encoding="utf-8")
+            console.success(f"Saved AI report to: {ai_file}")
+
+        asyncio.run(_run_ai_on_scan())
+    else:
+        # Run targeted standard scan with AI enabled
+        _execute_pipeline(ctx, target_or_scan_id, mode="standard", ai=True)
+
 
 
 @cli.command()
@@ -194,6 +310,8 @@ def doctor(ctx: click.Context) -> None:
     results = {}
     for tool in tools:
         path = shutil.which(tool)
+        if not path and tool == "cloud_enum":
+            path = shutil.which("cloud-enum")
         results[tool] = (bool(path), path or "Not installed")
         
     console.tool_availability(results)

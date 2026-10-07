@@ -15,10 +15,11 @@ or a direct Origin host. Updates IP records in the database with provider tags.
 from __future__ import annotations
 
 import ipaddress
+import socket
 import time
 from typing import Any
 
-from reconai.core.database.models import TechnologyRecord
+from reconai.core.database.models import IPRecord, TechnologyRecord
 from reconai.core.events.types import EventType
 from reconai.modules.base import ModuleConfig, ReconModule
 from reconai.modules.registry import register_module
@@ -66,7 +67,29 @@ class CDNClassifierModule(ReconModule):
     )
 
     async def run(self, **kwargs: Any) -> Any:
-        ip_records = self.db.get_ips(self.scan_id)
+        ip_records = list(self.db.get_ips(self.scan_id))
+        if not ip_records:
+            hosts = list(kwargs.get("hosts", []))
+            if not hosts and self.target:
+                clean = self.target.split("://")[-1].split("/")[0].split(":")[0]
+                hosts = [clean]
+
+            for h in hosts[:10]:
+                try:
+                    resolved_ip = socket.gethostbyname(h)
+                    rec = IPRecord(scan_id=self.scan_id, ip=resolved_ip, host=h)
+                    self.db.insert_ip(rec)
+                    ip_records.append({"ip": resolved_ip, "host": h})
+                    await self.events.emit_discovery(
+                        event_type=EventType.IP_DISCOVERED,
+                        source=self.config.name,
+                        data={"ip": resolved_ip, "host": h},
+                        scan_id=self.scan_id,
+                        target=self.target,
+                    )
+                except Exception:
+                    pass
+
         if not ip_records:
             return
 

@@ -28,8 +28,8 @@ class DalfoxModule(ReconModule):
     config = ModuleConfig(
         name="dalfox",
         category="vuln",
-        description="Automated XSS detection using Dalfox",
-        requires_tools=["dalfox"],
+        description="Automated XSS detection using Dalfox (with pure-Python fallback)",
+        requires_tools=[],
         supports_timeout=True,
     )
 
@@ -40,23 +40,73 @@ class DalfoxModule(ReconModule):
             if "?" in r.get("url", "") and "=" in r.get("url", "")
         ]
 
+        if not urls and self.target:
+            base = self.target if self.target.startswith(("http://", "https://")) else f"https://{self.target}"
+            urls = [f"{base}/?q=test", f"{base}/?search=test"]
+
         if not urls:
             return
 
         adapter = DalfoxAdapter(self.runner)
-        if not await adapter.is_available():
-            self.logger.error("dalfox not available. Skipping XSS scan.", module=self.config.name)
-            return
+        has_dalfox = await adapter.is_available()
 
         start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{len(urls)} parameterized URLs")
 
-        semaphore = asyncio.Semaphore(3)
-        tasks = [self._test_xss(adapter, semaphore, url) for url in urls]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        if has_dalfox:
+            semaphore = asyncio.Semaphore(3)
+            tasks = [self._test_xss(adapter, semaphore, url) for url in urls]
+            await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            self.record_warning(
+                "Dalfox not installed in PATH. Install: 'go install github.com/hahwul/dalfox/v2@latest' (or 'sudo apt install dalfox'). "
+                "Ran pure-Python XSS reflection probe fallback."
+            )
+            await self._python_xss_probe(urls[:10])
 
         duration = time.monotonic() - start
         self.logger.module_complete(self.config.name, duration=duration)
+
+    async def _python_xss_probe(self, urls: list[str]) -> None:
+        """Pure-Python XSS parameter reflection test probe."""
+        import httpx
+        from reconai.core.database.models import FindingRecord, Severity, Confidence, FindingStatus
+
+        probe_token = "reconai7xss<imgsrc=x>"
+        async with httpx.AsyncClient(verify=False, timeout=6.0, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
+            for url in urls:
+                test_url = url + probe_token
+                try:
+                    resp = await client.get(test_url)
+                    if probe_token in resp.text:
+                        finding = FindingRecord(
+                            scan_id=self.scan_id,
+                            title=f"Reflected Cross-Site Scripting (XSS) Potential in {url.split('?')[0]}",
+                            severity=Severity.MEDIUM,
+                            confidence=Confidence.LIKELY,
+                            status=FindingStatus.POTENTIAL,
+                            affected_asset=url,
+                            affected_asset_type="url",
+                            description=f"Raw HTML reflection detected for injected payload '{probe_token}' without proper sanitization.",
+                            impact="Session hijacking, credential theft, and unauthorized client-side actions.",
+                            remediation="Encode all user-supplied input before rendering into HTML responses (contextual output encoding).",
+                            source=self.config.name,
+                        )
+                        self.db.insert_finding(finding)
+                        await self.events.emit_discovery(
+                            event_type=EventType.FINDING_DISCOVERED,
+                            source=self.config.name,
+                            data={
+                                "title": finding.title,
+                                "severity": finding.severity.value,
+                                "asset": finding.affected_asset,
+                            },
+                            scan_id=self.scan_id,
+                            target=self.target,
+                        )
+                        self.logger.info(f"[XSS] Discovered unencoded parameter reflection on {url}", module=self.config.name)
+                except Exception:
+                    pass
 
     async def _test_xss(
         self,

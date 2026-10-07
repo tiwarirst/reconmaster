@@ -32,10 +32,8 @@ class SubdomainModule(ReconModule):
     config = ModuleConfig(
         name="subdomains_active",
         category="active",
-        description="Active subdomain enumeration using Subfinder (+ Amass if available)",
-        # Only require subfinder — the baseline tool that is always expected.
-        # Amass is checked at runtime and used opportunistically.
-        requires_tools=["subfinder"],
+        description="Active subdomain enumeration using Subfinder (+ Amass if available) with DNS brute-force fallback",
+        requires_tools=[],
         supports_timeout=True,
     )
 
@@ -58,18 +56,32 @@ class SubdomainModule(ReconModule):
 
             subdomains: set[str] = set()
 
-            # ── Build task list from available tools ───────────────────────
-            # Subfinder: already guaranteed available by check_requirements.
-            # Amass: checked here — used if present, silently skipped if not.
             tasks = []
-            tasks.append(self._run_subfinder(subfinder, domain))
+            if await subfinder.is_available():
+                tasks.append(self._run_subfinder(subfinder, domain))
             if await amass.is_available():
                 tasks.append(self._run_amass(amass, domain))
 
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for res in results:
-                if isinstance(res, set):
-                    subdomains.update(res)
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for res in results:
+                    if isinstance(res, set):
+                        subdomains.update(res)
+
+            if not tasks:
+                self.record_warning(
+                    "Subfinder / Amass not installed. Install: 'go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest'. "
+                    "Ran async DNS prefix discovery fallback."
+                )
+
+            # If external tools are not installed or returned no results, run fast DNS resolution
+            if not subdomains:
+                self.logger.info(
+                    f"External tools produced 0 subdomains for {domain}; running high-speed DNS prefix discovery...",
+                    module=self.config.name,
+                )
+                brute_subs = await self._brute_dns_prefixes(domain)
+                subdomains.update(brute_subs)
 
             for sub in subdomains:
                 record = SubdomainRecord(
@@ -104,3 +116,31 @@ class SubdomainModule(ReconModule):
         cmd = adapter.build_command(domain=domain, passive=True)
         result = await self.runner.run(command=cmd, timeout=300)
         return set(adapter.parse(result))
+
+    async def _brute_dns_prefixes(self, domain: str) -> set[str]:
+        """Resolve top high-value subdomains using asynchronous DNS as resilient fallback."""
+        import dns.asyncresolver
+        prefixes = [
+            "www", "mail", "api", "dev", "app", "vpn", "admin", "portal",
+            "staging", "test", "auth", "corp", "cdn", "support", "shop",
+            "status", "git", "jenkins", "m", "mobile", "beta", "cloud",
+            "secure", "remote", "login", "mx", "ns1", "ns2", "cpanel", "webmail"
+        ]
+        found: set[str] = set()
+        resolver = dns.asyncresolver.Resolver()
+        resolver.timeout = 1.5
+        resolver.lifetime = 3.0
+
+        async def _probe(prefix: str) -> None:
+            candidate = f"{prefix}.{domain}"
+            try:
+                answers = await resolver.resolve(candidate, "A")
+                if answers:
+                    found.add(candidate)
+            except Exception:
+                pass
+
+        tasks = [_probe(p) for p in prefixes]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        return found
+

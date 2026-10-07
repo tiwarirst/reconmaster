@@ -167,17 +167,21 @@ class ReconConsole:
         self._console.print()
 
     def tool_availability(self, tools: dict[str, tuple[bool, str]]) -> None:
-        """Display tool availability table."""
-        table = Table(title="Tool Availability", border_style="cyan")
-        table.add_column("Tool")
+        """Display tool availability table with installation / fix instructions."""
+        from reconai.core.orchestrator import TOOL_INSTALL_GUIDES
+
+        table = Table(title="Tool Availability & Recommended Fixes", border_style="cyan")
+        table.add_column("Tool", style="bold")
         table.add_column("Status")
-        table.add_column("Version", style="dim")
+        table.add_column("Version / Path", style="dim")
+        table.add_column("Installation / Fix Command", style="yellow")
 
         for tool, (available, version) in tools.items():
+            install_cmd = TOOL_INSTALL_GUIDES.get(tool, "—")
             if available:
-                table.add_row(tool, "[success]✓ Available[/success]", version)
+                table.add_row(tool, "[success]✓ Available[/success]", version, "—")
             else:
-                table.add_row(tool, "[warning]✗ Not found[/warning]", "—")
+                table.add_row(tool, "[warning]✗ Not found[/warning]", "—", install_cmd)
 
         self._console.print(table)
         self._console.print()

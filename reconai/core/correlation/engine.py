@@ -122,3 +122,83 @@ class CorrelationEngine:
                 })
 
         return graph
+
+    def get_correlated_chains(self) -> list[dict[str, Any]]:
+        """Extract multi-tier correlated attack surface chains: Host -> IP -> Ports -> Tech -> Findings."""
+        subs = self.db.get_subdomains(self.scan_id)
+        ips = self.db.get_ips(self.scan_id)
+        ports = self.db.get_ports(self.scan_id)
+        techs = self.db.get_technologies(self.scan_id)
+        findings = self.db.get_findings(self.scan_id)
+
+        # Map IPs by hostname
+        ip_map: dict[str, list[str]] = {}
+        for ip in ips:
+            ip_val = str(ip.get("ip", ""))
+            try:
+                raw_h = ip.get("hostnames", "[]")
+                hostnames = json.loads(raw_h) if isinstance(raw_h, str) else list(raw_h)
+            except Exception:
+                hostnames = []
+            for h in hostnames:
+                ip_map.setdefault(str(h).lower(), []).append(ip_val)
+
+        # Map ports by host/ip
+        port_map: dict[str, list[str]] = {}
+        for p in ports:
+            h = str(p.get("host", "")).lower()
+            svc = f"{p.get('port')}/{p.get('protocol')} ({p.get('service') or 'unknown'})"
+            port_map.setdefault(h, []).append(svc)
+
+        # Map techs by host
+        tech_map: dict[str, list[str]] = {}
+        for t in techs:
+            h = str(t.get("host", "")).lower()
+            val = t.get("name", "")
+            if t.get("version"):
+                val += f" {t['version']}"
+            tech_map.setdefault(h, []).append(val)
+
+        # Map findings by affected asset
+        find_map: dict[str, list[dict[str, str]]] = {}
+        for f in findings:
+            asset = str(f.get("affected_asset", "")).lower()
+            find_map.setdefault(asset, []).append({
+                "title": str(f.get("title", "")),
+                "severity": str(f.get("severity", "")),
+            })
+
+        chains: list[dict[str, Any]] = []
+        host_list = [str(s.get("subdomain")) for s in subs]
+        if not host_list:
+            host_list = list({str(p.get("host")) for p in ports if p.get("host")})
+
+        for host in host_list:
+            h_lower = host.lower()
+            associated_ips = ip_map.get(h_lower, [])
+
+            associated_ports = list(port_map.get(h_lower, []))
+            for ip in associated_ips:
+                associated_ports.extend(port_map.get(ip.lower(), []))
+            associated_ports = list(dict.fromkeys(associated_ports))
+
+            associated_techs = list(tech_map.get(h_lower, []))
+            for ip in associated_ips:
+                associated_techs.extend(tech_map.get(ip.lower(), []))
+            associated_techs = list(dict.fromkeys(associated_techs))
+
+            associated_findings: list[dict[str, str]] = []
+            for asset_key, f_list in find_map.items():
+                if h_lower in asset_key or any(ip.lower() in asset_key for ip in associated_ips):
+                    associated_findings.extend(f_list)
+
+            chains.append({
+                "host": host,
+                "ips": associated_ips,
+                "ports": associated_ports,
+                "technologies": associated_techs,
+                "findings": associated_findings,
+            })
+
+        return chains
+

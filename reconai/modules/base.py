@@ -68,6 +68,12 @@ class ReconModule(ABC):
         self.target: str = ""
         self.out_dir: Path = out_dir or Path("output")
         self.timeout: int = timeout
+        self.warnings: list[str] = []
+
+    def record_warning(self, message: str) -> None:
+        """Record an actionable warning or installation guidance for missing tools / errors."""
+        self.warnings.append(message)
+        self.logger.warning(message, module=self.config.name)
 
     async def check_requirements(self) -> tuple[bool, str]:
         """Check if external tools required by this module are available.

@@ -161,10 +161,17 @@ class MetadataSSRFModule(ReconModule):
         ]
 
         if not candidate_urls:
-            self.logger.debug(
-                "[CLOUD] No parameterized URLs found. Run crawler/paramspider first.",
-                module=self.config.name,
-            )
+            base_urls = list(kwargs.get("urls", []))
+            if not base_urls and self.target:
+                clean = self.target.split("://")[-1].split("/")[0].split(":")[0]
+                base_urls = [f"https://{clean}", f"http://{clean}"]
+
+            # Synthesize SSRF test probes on base target origins
+            for base in base_urls[:3]:
+                for param in ("url", "dest", "redirect", "target", "path", "fetch"):
+                    candidate_urls.append(f"{base.rstrip('/')}/?{param}=169.254.169.254")
+
+        if not candidate_urls:
             return
 
         start = time.monotonic()

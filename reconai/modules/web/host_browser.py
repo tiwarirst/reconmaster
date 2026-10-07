@@ -26,7 +26,7 @@ try:
 except ImportError:
     HAS_PLAYWRIGHT = False
 
-from reconai.core.database.models import URLRecord
+from reconai.core.database.models import APIEndpoint, URLRecord
 from reconai.core.events.types import EventType
 from reconai.core.stealth.engine import (
     STEALTH_JS,
@@ -59,9 +59,9 @@ class HostBrowserCrawlerModule(ReconModule):
 
     async def run(self, **kwargs: Any) -> Any:
         if not HAS_PLAYWRIGHT:
-            self.logger.error(
-                "Playwright not installed. Run: pip install playwright && playwright install",
-                module=self.config.name
+            self.record_warning(
+                "Playwright not installed in Python environment. Run: 'pip install playwright && playwright install chromium' "
+                "to enable stealth CDP real browser crawling and SPA automation."
             )
             return
 
@@ -288,9 +288,22 @@ class HostBrowserCrawlerModule(ReconModule):
 
             # ── Extract links via JS ──────────────────────────────────────
             links: list[str] = await page.evaluate("""
-                () => Array.from(document.querySelectorAll('a[href]'))
-                          .map(a => a.href)
-                          .filter(href => href.startsWith('http'))
+                () => {
+                    const found = new Set();
+                    document.querySelectorAll('a[href]').forEach(a => {
+                        if (a.href && a.href.startsWith('http')) found.add(a.href);
+                    });
+                    document.querySelectorAll('[data-href], [data-url], [data-path]').forEach(el => {
+                        const v = el.getAttribute('data-href') || el.getAttribute('data-url') || el.getAttribute('data-path');
+                        if (v) {
+                            try { found.add(new URL(v, window.location.href).href); } catch (e) {}
+                        }
+                    });
+                    document.querySelectorAll('form[action]').forEach(f => {
+                        try { found.add(new URL(f.action, window.location.href).href); } catch (e) {}
+                    });
+                    return Array.from(found);
+                }
             """)
 
             # ── Recurse on in-scope links ─────────────────────────────────
@@ -344,6 +357,16 @@ class HostBrowserCrawlerModule(ReconModule):
                 method="GET", source=f"{source}_api", depth=1
             )
             self.db.insert_url(record)
+            parsed_api = urlparse(api_url)
+            self.db.insert_api_endpoint(APIEndpoint(
+                scan_id=self.scan_id,
+                host=f"{parsed_api.scheme}://{parsed_api.netloc}",
+                method="GET",
+                path=parsed_api.path or "/",
+                full_url=api_url,
+                source=f"{source}_api",
+                api_type="XHR/Fetch",
+            ))
 
     async def _get_target_urls(self) -> list[str]:
         urls = self.db.get_urls(self.scan_id)

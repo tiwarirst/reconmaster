@@ -29,6 +29,33 @@ from reconai.core.scope.manager import ScopeManager
 from reconai.modules.registry import ModuleRegistry
 from reconai.ui.console import ReconConsole
 
+TOOL_INSTALL_GUIDES: dict[str, str] = {
+    "nmap": "sudo apt install nmap  (Windows: winget install Insecure.Nmap)",
+    "nuclei": "go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
+    "subfinder": "go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest",
+    "amass": "go install -v github.com/owasp-amass/amass/v4/...@master",
+    "katana": "go install github.com/projectdiscovery/katana/cmd/katana@latest",
+    "naabu": "go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest",
+    "dnsx": "go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest",
+    "dalfox": "go install github.com/hahwul/dalfox/v2@latest",
+    "sqlmap": "pip install sqlmap  (or sudo apt install sqlmap)",
+    "ffuf": "go install github.com/ffuf/ffuf/v2@latest  (or sudo apt install ffuf)",
+    "trufflehog": "go install github.com/trufflesecurity/trufflehog/v3@latest",
+    "paramspider": "git clone https://github.com/devanshbatham/paramspider && pip install ./paramspider",
+    "gowitness": "go install github.com/sensepost/gowitness@latest",
+    "whois": "sudo apt install whois",
+    "httpx": "go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest",
+    "whatweb": "sudo apt install whatweb",
+    "waybackurls": "go install github.com/tomnomnom/waybackurls@latest",
+    "wafw00f": "pip install wafw00f",
+    "masscan": "sudo apt install masscan",
+    "gobuster": "go install github.com/OJ/gobuster/v3@latest",
+    "dig": "sudo apt install dnsutils",
+    "cloud_enum": "pip install cloud-enum  (or git clone https://github.com/initstring/cloud_enum)",
+    "boto3": "pip install boto3",
+    "playwright": "pip install playwright && playwright install chromium",
+}
+
 
 class Orchestrator:
     """The central brain of ReconAI. Ties all components together."""
@@ -61,6 +88,8 @@ class Orchestrator:
         self.db.connect()
         self._register_event_handlers()
         
+        self.mode: str = "standard"
+        self.profile: str = "quick"
         self.modules_to_run: list[Any] = []
         self.results: dict[str, Any] = {}
 
@@ -87,6 +116,8 @@ class Orchestrator:
 
     async def prepare_scan(self, mode: str, profile: str) -> None:
         """Initialize the scan record and plan module execution."""
+        self.mode = mode
+        self.profile = profile
         self.console.banner()
         self.console.target(self.target)
         
@@ -163,25 +194,36 @@ class Orchestrator:
                 # Check requirements
                 avail, reason = await module.check_requirements()
                 if not avail:
-                    self.console.warning(f"Skipping module: {reason}", module=module.config.name)
+                    hints = []
+                    for tool in getattr(module.config, "requires_tools", []):
+                        if tool in TOOL_INSTALL_GUIDES:
+                            hints.append(f"Install {tool}: {TOOL_INSTALL_GUIDES[tool]}")
+                    hint_str = f" | Fix: {'; '.join(hints)}" if hints else ""
+                    self.console.warning(f"Skipping module: {reason}{hint_str}", module=module.config.name)
                     modules_failed += 1
-                    warnings.append(f"{module.config.name}: {reason}")
+                    warnings.append(f"{module.config.name}: {reason}{hint_str}")
                     continue
                     
                 # Run module
                 try:
                     mod_start = time.monotonic()
 
-                    # Build a standardized kwargs dict for every module.
-                    # Every module receives the same context — no special cases.
-                    # Modules that don't need a field simply ignore it.
-                    await module.run(**_build_module_kwargs(self.target))
+                    # Build dynamic kwargs context from current scan database state
+                    # Modules receive subdomains discovered so far, live URLs, IPs, profile, and mode
+                    module_kwargs = self._build_module_kwargs()
+                    await module.run(**module_kwargs)
 
                     mod_duration = time.monotonic() - mod_start
                     self.console.success(
                         f"Completed in {mod_duration:.1f}s", module=module.config.name
                     )
                     modules_completed += 1
+
+                    # Collect actionable warnings and tool install guidance from module
+                    if hasattr(module, "warnings") and module.warnings:
+                        for w in module.warnings:
+                            if w not in warnings:
+                                warnings.append(f"{module.config.name}: {w}")
                 except Exception as e:
                     self.console.error(f"Module failed: {e}", module=module.config.name)
                     self.logger.error(f"Module {module.config.name} exception: {e}")
@@ -226,38 +268,51 @@ class Orchestrator:
 
         self.console.summary(display_stats, warnings, report_path)
 
+    def _build_module_kwargs(self) -> dict[str, Any]:
+        """Build a dynamic, rich kwargs dict for every module's run().
 
-# ── Module-level helpers ──────────────────────────────────────────────────────
+        Gathers up-to-date state from the database:
+          - target: raw target
+          - domain: clean apex domain
+          - domains: [domain]
+          - subdomains: list of discovered subdomains
+          - hosts: target domain + discovered subdomains (for HTTP probe, port scan)
+          - urls: live URLs discovered in database (or fallback to target schemes)
+          - ips: IP addresses resolved in database
+          - profile: port scan profile selected by user ('quick', 'standard', etc.)
+          - mode: current scan mode ('passive', 'standard', 'deep', etc.)
+        """
+        target = self.target
+        if "://" in target:
+            raw = target.split("://", 1)[1]
+        else:
+            raw = target
 
-def _build_module_kwargs(target: str) -> dict[str, Any]:
-    """Build the standardized kwargs dict passed to every module's run().
+        domain = raw.split("/")[0].split("#")[0].split("?")[0].split(":")[0]
 
-    Every module receives the same set of keys so there are no special cases
-    in the orchestrator loop. Modules simply ignore the fields they don't need.
+        # Fetch discovered subdomains from DB
+        sub_records = self.db.get_subdomains(self.scan_id)
+        subdomains = [str(s["subdomain"]) for s in sub_records if s.get("subdomain")]
+        all_hosts = list(dict.fromkeys([domain] + subdomains))
 
-    Keys provided:
-        target  — the raw target as supplied by the user
-        domain  — clean hostname (scheme, port, and path stripped)
-        domains — list containing the single domain (convenience for modules
-                  that accept a list, e.g. dns_enum, subdomains_active)
+        # Fetch discovered URLs from DB (fallback to target root if none probed yet)
+        url_records = self.db.get_urls(self.scan_id)
+        live_urls = [str(r["url"]) for r in url_records if r.get("url")]
+        if not live_urls:
+            live_urls = [f"https://{domain}", f"http://{domain}"]
 
-    Examples:
-        "example.com"           → domain = "example.com"
-        "https://example.com"   → domain = "example.com"
-        "http://example.com/a"  → domain = "example.com"
-    """
-    # Strip scheme if present
-    if "://" in target:
-        raw = target.split("://", 1)[1]
-    else:
-        raw = target
+        # Fetch discovered IPs from DB
+        ip_records = self.db.get_ips(self.scan_id)
+        ips = [str(r["ip"]) for r in ip_records if r.get("ip")]
 
-    # Strip path, fragment, and port
-    domain = raw.split("/")[0].split("#")[0].split("?")[0].split(":")[0]
-
-    return {
-        "target":  target,
-        "domain":  domain,
-        "domains": [domain],
-        "hosts":   [domain],
-    }
+        return {
+            "target": target,
+            "domain": domain,
+            "domains": [domain],
+            "hosts": all_hosts,
+            "subdomains": subdomains,
+            "urls": live_urls,
+            "ips": ips,
+            "profile": self.profile,
+            "mode": self.mode,
+        }

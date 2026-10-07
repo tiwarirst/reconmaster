@@ -49,9 +49,41 @@ class Analyzer:
         """Generate a business-level executive summary of all findings."""
         findings = self.db.get_findings(self.scan_id)
         stats = self.db.get_scan_stats(self.scan_id)
+        subdomains = self.db.get_subdomains(self.scan_id)
+        ports = self.db.get_ports(self.scan_id)
+        technologies = self.db.get_technologies(self.scan_id)
+        cloud_assets = self.db.get_cloud_assets(self.scan_id)
 
         if not findings:
-            return "No security findings were identified in this scan."
+            # Generate Attack Surface Exposure & Intelligence Summary
+            sub_sample = ", ".join([str(s["subdomain"]) for s in subdomains[:10]]) or "None discovered"
+            ports_sample = ", ".join([f"{p['port']}/{p['protocol']} ({p.get('service', 'unknown')})" for p in ports[:10]]) or "None open"
+            tech_sample = ", ".join([f"{t['name']} {t.get('version', '')}".strip() for t in technologies[:10]]) or "None fingerprinted"
+            cloud_sample = ", ".join([f"{c['provider']} ({c['asset_name']})" for c in cloud_assets[:5]]) or "None"
+
+            prompt = (
+                "You are a Principal Cyber Security Architect reviewing an attack surface reconnaissance report for a client.\n"
+                f"Target: {stats.get('target', 'Target Domain')}\n"
+                f"Metrics: {stats.get('subdomains', 0)} subdomains, {stats.get('ports', 0)} open ports, "
+                f"{stats.get('urls', 0)} URLs discovered, {stats.get('technologies', 0)} technologies detected, "
+                f"{stats.get('cloud_assets', 0)} cloud assets.\n\n"
+                f"Subdomains identified: {sub_sample}\n"
+                f"Exposed ports/services: {ports_sample}\n"
+                f"Detected technologies/stack: {tech_sample}\n"
+                f"Cloud storage/endpoints: {cloud_sample}\n\n"
+                "Write a concise, professional 3-paragraph Security Exposure Assessment:\n"
+                "1. Attack Surface Overview: summary of perimeter footprint and exposed exposure.\n"
+                "2. Potential Threat Vectors: reconnaissance value to attackers (what exposed services/tech reveal).\n"
+                "3. Prioritized Hardening Recommendations: top 3 defensive actions to shrink the perimeter.\n"
+            )
+            summary = await self.ai.analyze(prompt)
+            if summary:
+                return summary
+            return (
+                f"Attack surface mapping completed for {stats.get('target', 'target')}. "
+                f"Discovered {stats.get('subdomains', 0)} subdomains, {stats.get('ports', 0)} open ports, "
+                f"and {stats.get('technologies', 0)} technologies. Zero direct vulnerability findings were flagged."
+            )
 
         critical = [f for f in findings if f["severity"] == "critical"]
         high = [f for f in findings if f["severity"] == "high"]
@@ -73,19 +105,19 @@ class Analyzer:
 
         prompt = (
             "You are a Principal Security Engineer writing an executive summary for a "
-            "Fortune 500 client's CISO. A penetration test discovered the following:\\n\\n"
+            "Fortune 500 client's CISO. A penetration test discovered the following:\n\n"
             f"Total Findings: {len(findings)} "
-            f"(Critical: {len(critical)}, High: {len(high)})\\n"
+            f"(Critical: {len(critical)}, High: {len(high)})\n"
             f"CVEs Identified: {len(cves)} | "
-            f"Actively Exploited in the Wild (CISA KEV): {cisa_kev_count}\\n"
+            f"Actively Exploited in the Wild (CISA KEV): {cisa_kev_count}\n"
             f"Attack Surface: {stats.get('subdomains', 0)} subdomains, "
             f"{stats.get('ports', 0)} open ports, "
-            f"{cloud_count} cloud assets (S3/GCS/Azure buckets & services)\\n\\n"
-            f"FINDINGS:\\n{findings_text}\\n\\n"
-            "Write a 3-paragraph executive summary that:\\n"
-            "1. Explains the overall risk posture in business terms (no jargon)\\n"
-            "2. Highlights the worst-case attack scenario an attacker could achieve\\n"
-            "3. Provides top 3 prioritized remediation actions with business justification\\n"
+            f"{cloud_count} cloud assets (S3/GCS/Azure buckets & services)\n\n"
+            f"FINDINGS:\n{findings_text}\n\n"
+            "Write a 3-paragraph executive summary that:\n"
+            "1. Explains the overall risk posture in business terms (no jargon)\n"
+            "2. Highlights the worst-case attack scenario an attacker could achieve\n"
+            "3. Provides top 3 prioritized remediation actions with business justification\n"
             "Be specific, concise, and alarming where warranted."
         )
         return await self.ai.analyze(prompt)

@@ -1,12 +1,6 @@
 """Advanced Directory Fuzzing Module.
 
-Uses FFuF for ultra-fast directory discovery.
-
-Fix applied (BUG 1):
-  Temp file is now owned by the module, not the adapter.
-  Concurrent _fuzz_url() calls each get an independent output file.
-  Added return_exceptions=True to asyncio.gather.
-  Added multi-wordlist discovery fallback and duration telemetry.
+Uses FFuF for ultra-fast directory discovery with zero-tool pure-Python fallback.
 """
 from __future__ import annotations
 
@@ -16,11 +10,25 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
+import httpx
+
+from reconai.core.database.models import URLRecord
 from reconai.core.events.types import EventType
 from reconai.integrations.ffuf import FfufAdapter
 from reconai.modules.base import ModuleConfig, ReconModule
 from reconai.modules.registry import register_module
+
+_HIGH_SIGNAL_PATHS = [
+    "admin", "api", "login", "auth", "portal", "dashboard", "console",
+    "v1", "v2", "api/v1", "api/v2", "swagger", "docs", "swagger.json",
+    "openapi.json", "graphql", ".env", ".git", ".git/HEAD", "robots.txt",
+    "sitemap.xml", "health", "metrics", "actuator", "status", "info",
+    "backup", "backups", "backup.sql", "db", "test", "dev", "staging",
+    "internal", "secret", "config", "wp-admin", "wp-login.php",
+    "phpinfo.php", "user", "users", "account", "static", "assets", "uploads",
+]
 
 
 @register_module
@@ -28,8 +36,8 @@ class FfufModule(ReconModule):
     config = ModuleConfig(
         name="ffuf_dir",
         category="web",
-        description="Fast directory brute-forcing using FFuF",
-        requires_tools=["ffuf"],
+        description="Fast directory brute-forcing using FFuF (with pure-Python fallback)",
+        requires_tools=[],
         supports_timeout=True,
     )
 
@@ -49,27 +57,41 @@ class FfufModule(ReconModule):
             return
 
         adapter = FfufAdapter(self.runner)
-        if not await adapter.is_available():
-            self.logger.error("ffuf not available. Skipping directory fuzzing.", module=self.config.name)
-            return
-
-        possible_wordlists = [
-            "/usr/share/wordlists/dirb/common.txt",
-            "/usr/share/wordlists/dirbuster/directory-list-2.3-small.txt",
-            "/usr/share/seclists/Discovery/Web-Content/common.txt",
-            "/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt",
-        ]
-        wordlist = next((w for w in possible_wordlists if os.path.exists(w)), "")
-        if not wordlist:
-            self.logger.warning("No standard wordlists found on system (/usr/share/wordlists/). Skipping ffuf.", module=self.config.name)
-            return
+        has_ffuf = await adapter.is_available()
 
         start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{len(urls)} URLs")
 
-        semaphore = asyncio.Semaphore(3)
-        tasks = [self._fuzz_url(adapter, semaphore, url, wordlist) for url in urls]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        if has_ffuf:
+            possible_wordlists = [
+                "/usr/share/wordlists/dirb/common.txt",
+                "/usr/share/wordlists/dirbuster/directory-list-2.3-small.txt",
+                "/usr/share/seclists/Discovery/Web-Content/common.txt",
+                "/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt",
+            ]
+            wordlist = next((w for w in possible_wordlists if os.path.exists(w)), "")
+            temp_wordlist_path: Path | None = None
+
+            if not wordlist:
+                # Create a temporary embedded wordlist so FFuF can execute even without SecLists installed
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as tmp_w:
+                    tmp_w.write("\n".join(_HIGH_SIGNAL_PATHS))
+                    temp_wordlist_path = Path(tmp_w.name)
+                    wordlist = str(temp_wordlist_path)
+
+            try:
+                semaphore = asyncio.Semaphore(3)
+                tasks = [self._fuzz_url(adapter, semaphore, url, wordlist) for url in urls[:5]]
+                await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                if temp_wordlist_path and temp_wordlist_path.exists():
+                    temp_wordlist_path.unlink(missing_ok=True)
+        else:
+            self.record_warning(
+                "FFuF not installed. Install: 'go install github.com/ffuf/ffuf/v2@latest' (or 'sudo apt install ffuf'). "
+                "Running built-in async HTTP directory discovery fallback..."
+            )
+            await self._pure_python_fuzz(urls[:5])
 
         duration = time.monotonic() - start
         self.logger.module_complete(self.config.name, duration=duration)
@@ -81,14 +103,7 @@ class FfufModule(ReconModule):
         url: str,
         wordlist: str,
     ) -> None:
-        """Fuzz a single URL for directories.
-
-        Temp file lifecycle:
-          1. Created here, before build_command.
-          2. Path passed to adapter — adapter instructs FFuF to write there.
-          3. Path passed to parse_output_file after process exits.
-          4. Always deleted in finally.
-        """
+        """Fuzz a single URL for directories using FFuF."""
         async with semaphore:
             tmp_path: Path | None = None
             try:
@@ -118,3 +133,44 @@ class FfufModule(ReconModule):
             finally:
                 if tmp_path and tmp_path.exists():
                     tmp_path.unlink(missing_ok=True)
+
+    async def _pure_python_fuzz(self, urls: list[str]) -> None:
+        """Built-in async HTTP directory prober when FFuF is not installed."""
+        semaphore = asyncio.Semaphore(10)
+        async with httpx.AsyncClient(
+            verify=False,
+            follow_redirects=False,
+            timeout=6.0,
+            headers={"User-Agent": "Mozilla/5.0 ReconAI-FFuF-Fallback/1.0"},
+        ) as client:
+            async def _probe(base_url: str, path: str) -> None:
+                target_url = urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
+                async with semaphore:
+                    try:
+                        resp = await client.get(target_url)
+                        if resp.status_code in (200, 204, 301, 302, 307, 308, 401, 403):
+                            record = URLRecord(
+                                scan_id=self.scan_id,
+                                url=target_url,
+                                method="GET",
+                                status_code=resp.status_code,
+                                content_length=len(resp.content),
+                                redirect_url=resp.headers.get("location", ""),
+                                source=self.config.name,
+                            )
+                            self.db.insert_url(record)
+                            await self.events.emit_discovery(
+                                event_type=EventType.URL_DISCOVERED,
+                                source=self.config.name,
+                                data={"url": target_url, "status": resp.status_code},
+                                scan_id=self.scan_id,
+                                target=self.target,
+                            )
+                    except Exception:
+                        pass
+
+            tasks = []
+            for u in urls:
+                for p in _HIGH_SIGNAL_PATHS:
+                    tasks.append(_probe(u, p))
+            await asyncio.gather(*tasks, return_exceptions=True)

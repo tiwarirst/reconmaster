@@ -148,10 +148,11 @@ class CloudEnumModule(ReconModule):
         ]
 
         if not cname_records:
-            self.logger.debug(
-                "No CNAME records found. Run dns_enum first for best results.",
+            self.logger.info(
+                "[CLOUD] No CNAME records found — evaluating NS and infrastructure records for cloud assets...",
                 module=self.config.name,
             )
+            await self._detect_from_infrastructure()
             return
 
         self.logger.info(
@@ -392,6 +393,63 @@ class CloudEnumModule(ReconModule):
                     self.db.insert_cloud_asset(record)
         except Exception as e:
             self.logger.debug(f"[CLOUD] cloud_enum parse error: {e}", module=self.config.name)
+
+    async def _detect_from_infrastructure(self) -> None:
+        """Identify cloud provider from NS records, MX records, and DNS infrastructure."""
+        dns_records = self.db.get_dns_records(self.scan_id)
+        detected_count = 0
+
+        for r in dns_records:
+            val = r.get("value", "").lower().rstrip(".")
+            rtype = r.get("record_type", "")
+            if rtype == "NS":
+                provider = None
+                service = None
+                if "awsdns" in val:
+                    provider = "aws"
+                    service = "AWS Route 53 DNS"
+                elif "cloudflare" in val:
+                    provider = "cloudflare"
+                    service = "Cloudflare Edge DNS"
+                elif "googledomains" in val or "google" in val:
+                    provider = "gcp"
+                    service = "Google Cloud DNS"
+                elif "azure-dns" in val:
+                    provider = "azure"
+                    service = "Azure DNS"
+
+                if provider and service:
+                    tech_record = TechnologyRecord(
+                        scan_id=self.scan_id,
+                        host=self.target,
+                        name=service,
+                        category="cloud_infrastructure",
+                        confidence=0.95,
+                        source=self.config.name,
+                        evidence=[f"NS: {val}"],
+                    )
+                    self.db.insert_technology(tech_record)
+
+                    asset_record = CloudAssetRecord(
+                        scan_id=self.scan_id,
+                        provider=provider,
+                        asset_type="cloud_dns_infrastructure",
+                        asset_name=val,
+                        url=f"https://{self.target}",
+                        is_public=True,
+                        is_writable=False,
+                        region="global",
+                        metadata={"service": service, "ns_record": val},
+                        source=self.config.name,
+                    )
+                    self.db.insert_cloud_asset(asset_record)
+                    detected_count += 1
+
+        if detected_count > 0:
+            self.logger.info(
+                f"[CLOUD] Identified {detected_count} cloud infrastructure asset(s) from DNS posture.",
+                module=self.config.name,
+            )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

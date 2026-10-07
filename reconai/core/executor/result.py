@@ -56,6 +56,10 @@ class CommandResult(BaseModel):
         return self.status == CommandStatus.SUCCESS
 
     @property
+    def success(self) -> bool:
+        return self.succeeded
+
+    @property
     def failed(self) -> bool:
         return self.status in (CommandStatus.FAILED, CommandStatus.ERROR)
 

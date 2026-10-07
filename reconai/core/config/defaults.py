@@ -106,9 +106,10 @@ SCAN_MODES = {
             "dns_enum", "whois", "cert_transparency", "archive_urls",
             "dnsx", "http_probe", "naabu_ports", "ports", "cdn_classifier",
             "technologies", "headers", "waf_detection", "email_security",
-            "saas_enum", "api_miner", "dev_artifacts",
+            "saas_enum", "directory_discovery", "crawler", "api_miner", "dev_artifacts",
+            "screenshot",
         ],
-        "description": "Standard reconnaissance — passive + port scan + tech fingerprinting",
+        "description": "Standard reconnaissance — passive + active ports + tech + web crawl + directory + screenshots",
     },
     "deep": {
         "modules": [
@@ -166,6 +167,32 @@ SCAN_MODES = {
             "fingerprinting, subdomain takeover detection, SSRF->metadata credential theft, "
             "and IAM credential validation."
         ),
+    },
+    "subs": {
+        "modules": [
+            "dns_enum", "cert_transparency", "archive_urls", "dnsx", "subdomains_active",
+        ],
+        "description": "Dedicated Subdomain Intelligence Pipeline — passive & active multi-engine subdomain discovery",
+    },
+    "ports": {
+        "modules": [
+            "dns_enum", "dnsx", "naabu_ports", "ports", "cdn_classifier",
+        ],
+        "description": "Dedicated Port & Service Pipeline — high-speed port scanning, banner grabbing, and CDN classification",
+    },
+    "web": {
+        "modules": [
+            "http_probe", "technologies", "headers", "waf_detection", "crawler",
+            "directory_discovery", "api_miner", "dev_artifacts", "screenshot",
+        ],
+        "description": "Dedicated Web Attack Surface Pipeline — deep crawling, tech stack fingerprinting, directory discovery, and visual screenshots",
+    },
+    "vuln": {
+        "modules": [
+            "http_probe", "api_miner", "dev_artifacts", "nuclei_vuln", "secrets",
+            "dalfox", "sqlmap", "vuln_intelligence",
+        ],
+        "description": "Dedicated Vulnerability Pipeline — automated vulnerability assessment, exposed secret scanning, and exploit intelligence",
     },
 }
 

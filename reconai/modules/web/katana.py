@@ -33,8 +33,8 @@ class KatanaModule(ReconModule):
     config = ModuleConfig(
         name="katana_crawler",
         category="web",
-        description="Advanced JS-aware web crawling using Katana",
-        requires_tools=["katana"],
+        description="Advanced JS-aware web crawling using Katana (with pure-Python fallback)",
+        requires_tools=[],
         supports_timeout=True,
     )
 
@@ -47,22 +47,61 @@ class KatanaModule(ReconModule):
                 if r.get("status_code") == 200 and r.get("depth", 0) == 0
             ]
 
+        if not urls and self.target:
+            base = self.target if self.target.startswith(("http://", "https://")) else f"https://{self.target}"
+            urls = [base]
+
         if not urls:
             return
 
         adapter = KatanaAdapter(self.runner)
-        if not await adapter.is_available():
-            self.logger.error("katana not available. Skipping advanced crawling.", module=self.config.name)
-            return
+        has_katana = await adapter.is_available()
 
         self.logger.module_start(self.config.name, target=f"{len(urls)} URLs")
         start = time.monotonic()
 
-        semaphore = asyncio.Semaphore(3)
-        tasks = [self._crawl_url(adapter, semaphore, url) for url in urls]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        if has_katana:
+            semaphore = asyncio.Semaphore(3)
+            tasks = [self._crawl_url(adapter, semaphore, url) for url in urls]
+            await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            self.record_warning(
+                "Katana not installed in PATH. Install: 'go install github.com/projectdiscovery/katana/cmd/katana@latest'. "
+                "Ran robots/sitemap crawler fallback."
+            )
+            await self._crawl_sitemaps(urls[:5])
 
         self.logger.module_complete(self.config.name, duration=time.monotonic() - start)
+
+    async def _crawl_sitemaps(self, base_urls: list[str]) -> None:
+        """Parse robots.txt and sitemap.xml as fallback URL discovery."""
+        import httpx
+        import re
+        from urllib.parse import urljoin
+        from reconai.core.database.models import URLRecord
+
+        async with httpx.AsyncClient(verify=False, timeout=6.0, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
+            for base in base_urls:
+                for probe_path in ("/robots.txt", "/sitemap.xml"):
+                    target_url = urljoin(base, probe_path)
+                    try:
+                        resp = await client.get(target_url)
+                        if resp.status_code == 200:
+                            extracted = re.findall(r"(?:Disallow|Allow|Sitemap|loc):\s*([^\s]+)", resp.text)
+                            for link in extracted[:50]:
+                                full = urljoin(base, link) if link.startswith("/") else link
+                                if full.startswith("http"):
+                                    rec = URLRecord(scan_id=self.scan_id, url=full, method="GET", source="crawler_sitemap")
+                                    self.db.insert_url(rec)
+                                    await self.events.emit_discovery(
+                                        event_type=EventType.URL_DISCOVERED,
+                                        source=self.config.name,
+                                        data={"url": full, "status": 200},
+                                        scan_id=self.scan_id,
+                                        target=self.target,
+                                    )
+                    except Exception:
+                        pass
 
     async def _crawl_url(self, adapter: KatanaAdapter, semaphore: asyncio.Semaphore, url: str) -> None:
         async with semaphore:

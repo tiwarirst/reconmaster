@@ -66,7 +66,7 @@ class SecurityHeadersModule(ReconModule):
         start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{len(urls)} URLs")
 
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+        async with httpx.AsyncClient(verify=False, follow_redirects=True, timeout=10.0) as client:
             tasks = [self._check_headers(client, url) for url in urls[:20]] # Limit to 20 to avoid spam
             await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -75,12 +75,23 @@ class SecurityHeadersModule(ReconModule):
 
     async def _check_headers(self, client: httpx.AsyncClient, url: str) -> None:
         try:
-            response = await client.head(url)
+            try:
+                response = await client.head(url)
+                if response.status_code in (403, 405) or not response.headers:
+                    response = await client.get(url)
+            except Exception:
+                response = await client.get(url)
+
             headers = {k.lower(): v for k, v in response.headers.items()}
+            is_https = str(response.url).startswith("https://") or url.startswith("https://")
 
             for header, info in self.REQUIRED_HEADERS.items():
+                # HSTS is only applicable to HTTPS endpoints
+                if header == "Strict-Transport-Security" and not is_https:
+                    continue
+
                 if header.lower() not in headers:
-                    severity: Severity = info["severity"]  # already a Severity enum
+                    severity: Severity = info["severity"]
                     finding = FindingRecord(
                         scan_id=self.scan_id,
                         title=f"Missing Security Header: {header}",

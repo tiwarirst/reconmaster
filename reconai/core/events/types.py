@@ -39,6 +39,7 @@ class EventType(str, Enum):
     # Findings
     FINDING_CREATED = "finding.created"
     FINDING_UPDATED = "finding.updated"
+    FINDING_DISCOVERED = "finding.discovered"
 
     # Tool events
     TOOL_STARTED = "tool.started"

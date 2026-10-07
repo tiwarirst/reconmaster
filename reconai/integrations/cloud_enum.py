@@ -24,6 +24,19 @@ class CloudEnumAdapter(ToolAdapter):
 
     name = "cloud_enum"
 
+    def __init__(self, runner: CommandRunner) -> None:
+        super().__init__(runner)
+        self.binary_name = "cloud_enum"
+
+    async def is_available(self) -> bool:
+        """Check if cloud_enum or cloud-enum is installed and callable."""
+        for binary in ("cloud_enum", "cloud-enum"):
+            available, _ = await self.runner.check_tool(binary)
+            if available:
+                self.binary_name = binary
+                return True
+        return False
+
     def build_command(
         self,
         keyword: str,
@@ -40,7 +53,7 @@ class CloudEnumAdapter(ToolAdapter):
             mutations_file:  Custom mutations wordlist
         """
         cmd = [
-            "cloud_enum",
+            self.binary_name,
             "-k", keyword,
         ]
 
@@ -122,11 +135,6 @@ class CloudEnumAdapter(ToolAdapter):
             records.append(record)
 
         return records
-
-    async def is_available(self) -> bool:
-        """Check if cloud_enum is installed and callable."""
-        available, _ = await self.runner.check_tool(self.name)
-        return available
 
     def parse(self, result: CommandResult) -> list[Any]:
         """Required by ToolAdapter — cloud_enum writes to a file; use parse_output_file()."""

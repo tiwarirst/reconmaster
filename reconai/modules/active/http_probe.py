@@ -36,11 +36,12 @@ class HTTPProbeModule(ReconModule):
     )
 
     async def run(self, **kwargs: Any) -> Any:
-        hosts: list[str] = list(kwargs.get("hosts", []))
-        if not hosts:
-            # Fall back to all subdomains in the DB
-            subs = self.db.get_subdomains(self.scan_id)
-            hosts = [str(s["subdomain"]) for s in subs]
+        subs = self.db.get_subdomains(self.scan_id)
+        sub_hosts = [str(s["subdomain"]) for s in subs if s.get("subdomain")]
+        kw_hosts = list(kwargs.get("hosts", []))
+        
+        # Merge target, kwargs hosts, and discovered subdomains
+        hosts = list(dict.fromkeys(kw_hosts + sub_hosts))
 
         if not hosts and self.target:
             clean = self.target.split("://")[-1].split("/")[0].split(":")[0]
@@ -58,7 +59,7 @@ class HTTPProbeModule(ReconModule):
         async with httpx.AsyncClient(
             verify=False, follow_redirects=False, timeout=10.0
         ) as client:
-            tasks = [self._probe_host(client, semaphore, host) for host in hosts]
+            tasks = [self._probe_host(client, semaphore, host) for host in hosts[:150]]
             await asyncio.gather(*tasks, return_exceptions=True)
 
         duration = time.monotonic() - start
@@ -76,11 +77,12 @@ class HTTPProbeModule(ReconModule):
                 try:
                     response = await client.get(url)
 
-                    # Use the pre-compiled regex — no import inside the loop
                     title = ""
                     match = _RE_TITLE.search(response.text)
                     if match:
                         title = match.group(1).strip()
+
+                    redirect_url = response.headers.get("location", "")
 
                     record = URLRecord(
                         scan_id=self.scan_id,
@@ -90,10 +92,10 @@ class HTTPProbeModule(ReconModule):
                         content_type=response.headers.get("content-type", ""),
                         content_length=len(response.content),
                         title=title,
-                        redirect_url=response.headers.get("location", ""),
+                        redirect_url=redirect_url,
                         source="http_probe",
                     )
-                    self.db.insert_url(record)  # INSERT OR IGNORE — no duplicates
+                    self.db.insert_url(record)
 
                     await self.events.emit_discovery(
                         event_type=EventType.URL_DISCOVERED,
@@ -102,6 +104,31 @@ class HTTPProbeModule(ReconModule):
                         scan_id=self.scan_id,
                         target=self.target,
                     )
+
+                    # If this is a redirect, also probe the destination to record the live 200 URL
+                    if response.status_code in (301, 302, 303, 307, 308) and redirect_url:
+                        from urllib.parse import urljoin
+                        dest_url = urljoin(url, redirect_url)
+                        try:
+                            dest_resp = await client.get(dest_url, follow_redirects=True)
+                            dest_title = ""
+                            dest_match = _RE_TITLE.search(dest_resp.text)
+                            if dest_match:
+                                dest_title = dest_match.group(1).strip()
+
+                            dest_record = URLRecord(
+                                scan_id=self.scan_id,
+                                url=str(dest_resp.url),
+                                method="GET",
+                                status_code=dest_resp.status_code,
+                                content_type=dest_resp.headers.get("content-type", ""),
+                                content_length=len(dest_resp.content),
+                                title=dest_title,
+                                source="http_probe",
+                            )
+                            self.db.insert_url(dest_record)
+                        except Exception:
+                            pass
 
                 except httpx.RequestError:
                     pass  # Host unreachable — expected, not an error
