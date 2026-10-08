@@ -54,6 +54,11 @@ TOOL_INSTALL_GUIDES: dict[str, str] = {
     "cloud_enum": "pip install cloud-enum  (or git clone https://github.com/initstring/cloud_enum)",
     "boto3": "pip install boto3",
     "playwright": "pip install playwright && playwright install chromium",
+    "arjun": "pip install arjun  (or sudo apt install arjun)",
+    "subzy": "go install -v github.com/pentest-io/subzy@latest",
+    "gitleaks": "brew install gitleaks  (or go install github.com/zricethezav/gitleaks/v8@latest)",
+    "tlsx": "go install -v github.com/projectdiscovery/tlsx/cmd/tlsx@latest",
+    "gau": "go install github.com/lc/gau/v2/cmd/gau@latest",
 }
 
 

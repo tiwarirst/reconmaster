@@ -80,11 +80,35 @@ class SecretsModule(ReconModule):
                         target=self.target,
                     )
         else:
-            self.record_warning(
-                "TruffleHog not installed in PATH. Install: 'go install github.com/trufflesecurity/trufflehog/v3@latest' "
-                "(or curl script). Ran pure-Python regex secrets detection fallback."
-            )
-            await self._python_regex_secret_scan(js_urls[:20])
+            # Check Gitleaks as alternative fast binary secret scanner
+            from reconai.integrations.gitleaks import GitleaksAdapter
+            g_adapter = GitleaksAdapter(self.runner)
+            has_gitleaks = await g_adapter.is_available()
+
+            if has_gitleaks:
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    tmp_path = Path(tmp_dir)
+                    async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+                        tasks = [self._download_file(client, url, tmp_path) for url in js_urls[:50]]
+                        await asyncio.gather(*tasks, return_exceptions=True)
+
+                    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf_report:
+                        rep_path = Path(tf_report.name)
+                    try:
+                        cmd = g_adapter.build_command(target_dir=tmp_path, output_file=rep_path)
+                        await self.runner.run(command=cmd, timeout=120)
+                        findings = g_adapter.parse_output_file(rep_path)
+                        for finding in findings:
+                            finding.scan_id = self.scan_id
+                            await self.emit_finding(finding)
+                    finally:
+                        rep_path.unlink(missing_ok=True)
+            else:
+                self.record_warning(
+                    "TruffleHog / Gitleaks not installed in PATH. Install: 'go install github.com/trufflesecurity/trufflehog/v3@latest' "
+                    "or 'brew/apt install gitleaks'. Ran pure-Python regex secrets detection fallback."
+                )
+                await self._python_regex_secret_scan(js_urls[:20])
 
         duration = time.monotonic() - start
         self.logger.module_complete(self.config.name, duration=duration)

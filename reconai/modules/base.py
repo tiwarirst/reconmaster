@@ -71,6 +71,18 @@ class ReconModule(ABC):
         self.warnings: list[str] = []
         self.scope: Any = None
 
+    @property
+    def name(self) -> str:
+        return self.config.name
+
+    @property
+    def description(self) -> str:
+        return self.config.description
+
+    @property
+    def category(self) -> str:
+        return self.config.category
+
     def is_in_scope(self, candidate: str) -> bool:
         """Centralized validation against authorized scanning scope boundaries."""
         if not self.scope:

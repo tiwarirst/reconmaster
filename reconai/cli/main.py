@@ -53,10 +53,15 @@ import reconai.modules.cloud.iam_analyzer
 # Extended enterprise & posture modules
 import reconai.modules.passive.email_security
 import reconai.modules.passive.saas_enum
+import reconai.modules.passive.asn_enum
+import reconai.modules.passive.osint_fusion
 import reconai.modules.web.api_miner
 import reconai.modules.web.dev_artifacts
 import reconai.modules.active.cdn_classifier
 import reconai.modules.web.screenshot
+import reconai.modules.web.arjun_miner
+import reconai.modules.cloud.subzy_takeover
+import reconai.modules.active.tlsx_probe
 
 
 @click.group()
@@ -92,10 +97,15 @@ def _execute_pipeline(
     scope_file: str | None = None,
     ai_url: str | None = None,
     ai_model: str | None = None,
+    config: str | None = None,
 ) -> None:
     """Shared execution engine for all pipeline commands."""
     console: ReconConsole = ctx.obj["console"]
     config_mgr: ConfigManager = ctx.obj["config_mgr"]
+
+    if config:
+        config_mgr = ConfigManager(Path(config))
+        ctx.obj["config_mgr"] = config_mgr
 
     if timeout:
         config_mgr.override(default_timeout=timeout)
@@ -161,8 +171,19 @@ def _execute_pipeline(
         ai_summary = ""
         ai_model_name = ""
         attack_chain = ""
-        effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
-        effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
+        effective_ai_url = (
+            ai_url
+            or os.getenv("OLLAMA_BASE_URL")
+            or os.getenv("OLLAMA_HOST")
+            or getattr(getattr(config_mgr.config, "ai", None), "url", None)
+            or "http://localhost:11434"
+        )
+        effective_ai_model = (
+            ai_model
+            or os.getenv("OLLAMA_MODEL")
+            or getattr(getattr(config_mgr.config, "ai", None), "model", None)
+            or "llama3"
+        )
         if ai or mode in ("deep", "cloud", "vuln"):
             try:
                 from reconai.ai.local import OllamaAdapter
@@ -229,6 +250,11 @@ def _execute_pipeline(
                 console.info(f"Emergency report saved to: {reports['markdown'].parent}")
         except Exception:
             pass
+    finally:
+        try:
+            orchestrator.db.close()
+        except Exception:
+            pass
 
 
 @cli.command()
@@ -242,10 +268,11 @@ def _execute_pipeline(
 @click.option("--ai-model", type=str, help="Ollama model name (e.g. llama3, deepseek-r1:7b)")
 @click.option("--strict-scope", is_flag=True, help="Strictly limit discovery to provided target (default is permissive for deep AI data)")
 @click.option("--scope-file", type=click.Path(exists=True), help="Path to scope YAML file for explicit boundary rules")
+@click.option("--config", type=click.Path(exists=True), help="Path to custom config.yaml")
 @click.pass_context
-def scan(ctx: click.Context, target: str, mode: str, profile: str, timeout: int | None, dry_run: bool, ai: bool, ai_url: str | None, ai_model: str | None, strict_scope: bool, scope_file: str | None) -> None:
+def scan(ctx: click.Context, target: str, mode: str, profile: str, timeout: int | None, dry_run: bool, ai: bool, ai_url: str | None, ai_model: str | None, strict_scope: bool, scope_file: str | None, config: str | None = None) -> None:
     """Run an orchestrated reconnaissance scan against a target."""
-    _execute_pipeline(ctx, target, mode=mode, profile=profile, timeout=timeout, dry_run=dry_run, ai=ai, ai_url=ai_url, ai_model=ai_model, strict_scope=strict_scope, scope_file=scope_file)
+    _execute_pipeline(ctx, target, mode=mode, profile=profile, timeout=timeout, dry_run=dry_run, ai=ai, ai_url=ai_url, ai_model=ai_model, strict_scope=strict_scope, scope_file=scope_file, config=config)
 
 
 @cli.command()
@@ -430,9 +457,10 @@ def doctor(ctx: click.Context) -> None:
     
     tools = [
         "nmap", "amass", "subfinder", "httpx", "nuclei", "whatweb",
-        "waybackurls", "wafw00f", "trufflehog", "naabu", "masscan",
+        "waybackurls", "gau", "wafw00f", "trufflehog", "naabu", "masscan",
         "gobuster", "ffuf", "dig", "whois", "katana", "sqlmap",
-        "dalfox", "paramspider", "dnsx", "gowitness",
+        "dalfox", "paramspider", "dnsx", "gowitness", "arjun", "subzy", "gitleaks",
+        "tlsx",
         # Cloud enumeration tools
         "cloud_enum",
     ]
@@ -494,9 +522,12 @@ def compare(ctx: click.Context, old_scan_id: str, new_scan_id: str) -> None:
     # To keep this simple, we just instantiate two DBs and query them.
     db_old = DatabaseManager(db_path=old_db_path)
     db_new = DatabaseManager(db_path=new_db_path)
-    
-    old_data = db_old.get_scan_data_for_comparison(old_scan_id)
-    new_data = db_new.get_scan_data_for_comparison(new_scan_id)
+    try:
+        old_data = db_old.get_scan_data_for_comparison(old_scan_id)
+        new_data = db_new.get_scan_data_for_comparison(new_scan_id)
+    finally:
+        db_old.close()
+        db_new.close()
     
     # Compare
     console.banner()
@@ -554,39 +585,42 @@ def exploit(ctx: click.Context, scan_id: str, finding_title: str, ai_url: str | 
         
     from reconai.core.database.manager import DatabaseManager
     db = DatabaseManager(db_path=scan_dir / "reconai.db")
-    findings = db.get_findings(scan_id)
-    
-    # Simple search
-    target_finding = None
-    for f in findings:
-        if finding_title.lower() in f["title"].lower():
-            target_finding = f
-            break
-            
-    if not target_finding:
-        console.error(f"Finding matching '{finding_title}' not found in scan {scan_id}.")
-        sys.exit(1)
+    try:
+        findings = db.get_findings(scan_id)
         
-    from reconai.ai.local import OllamaAdapter
-    from reconai.ai.analyzer import Analyzer
-    effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
-    effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
-    llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
-    
-    async def _run() -> None:
-        has_ai = await llm.is_available()
-        if not has_ai:
-            console.warning("Local/Remote LLM (Ollama) is not running. Generating deterministic verification PoC package...")
-        else:
-            console.info(f"Generating PoC exploit and analysis for: {target_finding['title']} using {llm.model} at {llm.base_url}...")
+        # Simple search
+        target_finding = None
+        for f in findings:
+            if finding_title.lower() in f["title"].lower():
+                target_finding = f
+                break
+                
+        if not target_finding:
+            console.error(f"Finding matching '{finding_title}' not found in scan {scan_id}.")
+            sys.exit(1)
+            
+        from reconai.ai.local import OllamaAdapter
+        from reconai.ai.analyzer import Analyzer
+        effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
+        effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
+        llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
+        
+        async def _run() -> None:
+            has_ai = await llm.is_available()
+            if not has_ai:
+                console.warning("Local/Remote LLM (Ollama) is not running. Generating deterministic verification PoC package...")
+            else:
+                console.info(f"Generating PoC exploit and analysis for: {target_finding['title']} using {llm.model} at {llm.base_url}...")
 
-        analyzer = Analyzer(llm, db, scan_id)
-        result = await analyzer.generate_exploit_poc(target_finding)
+            analyzer = Analyzer(llm, db, scan_id)
+            result = await analyzer.generate_exploit_poc(target_finding)
 
-        console.banner()
-        console.console.print(f"[bold red]Exploit Analysis & PoC:[/bold red]\n\n{result}")
+            console.banner()
+            console.console.print(f"[bold red]Exploit Analysis & PoC:[/bold red]\n\n{result}")
 
-    asyncio.run(_run())
+        asyncio.run(_run())
+    finally:
+        db.close()
 
 
 @cli.command()
@@ -620,96 +654,515 @@ def report(ctx: click.Context, scan_path_or_id: str, ai: bool, ai_url: str | Non
     db_path = scan_dir / "reconai.db"
     from reconai.core.database.manager import DatabaseManager
     db = DatabaseManager(db_path=db_path)
+    try:
+        # Resolve scan metadata from db or directory structure
+        scans = db.list_scans(limit=1)
+        scan_id = scans[0]["id"] if scans else scan_dir.name
+        target = scans[0]["target"] if scans else scan_dir.parent.name
 
-    # Resolve scan metadata from db or directory structure
-    scans = db.list_scans(limit=1)
-    scan_id = scans[0]["id"] if scans else scan_dir.name
-    target = scans[0]["target"] if scans else scan_dir.parent.name
+        console.banner()
+        console.info(f"Generating reports for target: [bold cyan]{target}[/bold cyan] (Scan: {scan_id})")
 
-    console.banner()
-    console.info(f"Generating reports for target: [bold cyan]{target}[/bold cyan] (Scan: {scan_id})")
+        # Generate PoCs for findings
+        findings = db.get_findings(scan_id)
+        if findings:
+            from reconai.intelligence.poc_generator import PoCGenerator
+            poc_gen = PoCGenerator()
+            pocs_dir = scan_dir / "pocs"
+            pocs_dir.mkdir(parents=True, exist_ok=True)
+            pocs_created = 0
+            for idx, finding in enumerate(findings, start=1):
+                try:
+                    poc = poc_gen.generate(finding)
+                    raw_title = str(finding.get("title") or f"vuln_{idx}")
+                    clean_slug = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_title).strip("_").lower()[:40]
+                    slug = clean_slug if clean_slug else f"finding_{idx}"
+                    if poc.python_script:
+                        (pocs_dir / f"poc_{idx}_{slug}.py").write_text(poc.python_script, encoding="utf-8")
+                    if poc.curl_command:
+                        (pocs_dir / f"poc_{idx}_{slug}.sh").write_text(
+                            f"#!/usr/bin/env bash\n# Reproduction curl for: {raw_title}\n{poc.curl_command}\n", encoding="utf-8"
+                        )
+                    if poc.nuclei_template:
+                        (pocs_dir / f"poc_{idx}_{slug}.yaml").write_text(poc.nuclei_template, encoding="utf-8")
+                    pocs_created += 1
+                except Exception as exc:
+                    console.debug(f"PoC generation skipped for finding #{idx}: {exc}")
+            if pocs_created:
+                console.success(f"Generated {pocs_created} runnable PoC verification packages in: {pocs_dir}")
 
-    # Generate PoCs for findings
-    findings = db.get_findings(scan_id)
-    if findings:
-        from reconai.intelligence.poc_generator import PoCGenerator
-        poc_gen = PoCGenerator()
-        pocs_dir = scan_dir / "pocs"
-        pocs_dir.mkdir(parents=True, exist_ok=True)
-        pocs_created = 0
-        for idx, finding in enumerate(findings, start=1):
-            try:
-                poc = poc_gen.generate(finding)
-                raw_title = str(finding.get("title") or f"vuln_{idx}")
-                clean_slug = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_title).strip("_").lower()[:40]
-                slug = clean_slug if clean_slug else f"finding_{idx}"
-                if poc.python_script:
-                    (pocs_dir / f"poc_{idx}_{slug}.py").write_text(poc.python_script, encoding="utf-8")
-                if poc.curl_command:
-                    (pocs_dir / f"poc_{idx}_{slug}.sh").write_text(
-                        f"#!/usr/bin/env bash\n# Reproduction curl for: {raw_title}\n{poc.curl_command}\n", encoding="utf-8"
-                    )
-                if poc.nuclei_template:
-                    (pocs_dir / f"poc_{idx}_{slug}.yaml").write_text(poc.nuclei_template, encoding="utf-8")
-                pocs_created += 1
-            except Exception as exc:
-                console.debug(f"PoC generation skipped for finding #{idx}: {exc}")
-        if pocs_created:
-            console.success(f"Generated {pocs_created} runnable PoC verification packages in: {pocs_dir}")
+        # Optional AI analysis
+        ai_summary = ""
+        ai_model_name = ""
+        attack_chain = ""
+        effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
+        effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
+        if ai:
+            from reconai.ai.local import OllamaAdapter
+            from reconai.ai.analyzer import Analyzer
+            llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
 
-    # Optional AI analysis
-    ai_summary = ""
-    ai_model_name = ""
-    attack_chain = ""
-    effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
-    effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
-    if ai:
-        from reconai.ai.local import OllamaAdapter
-        from reconai.ai.analyzer import Analyzer
+            async def _run_ai() -> None:
+                nonlocal ai_summary, ai_model_name, attack_chain
+                if await llm.is_available():
+                    ai_model_name = llm.model
+                    console.info(f"Running AI analysis with LLM ('{llm.model}') at {llm.base_url}...")
+                    analyzer = Analyzer(llm, db, scan_id)
+                    ai_summary = await analyzer.summarize_findings()
+                    attack_chain = await analyzer.generate_attack_chain()
+                    console.console.print(f"\n[bold cyan]AI Summary ({llm.model} @ {llm.base_url}):[/bold cyan]\n{ai_summary}\n")
+                    if attack_chain and "Not enough findings" not in attack_chain:
+                        console.console.print(f"\n[bold magenta]AI Correlated Attack Kill Chain ({llm.model}):[/bold magenta]\n{attack_chain}\n")
+                    reports_dir = scan_dir / "reports"
+                    reports_dir.mkdir(parents=True, exist_ok=True)
+                    ai_file = reports_dir / "ai_analysis.md"
+                    content = f"# AI Threat Assessment: {target}\n\n**Model:** `{llm.model}` (`{llm.base_url}`)\n\n{ai_summary}\n"
+                    if attack_chain and "Not enough findings" not in attack_chain:
+                        content += f"\n## Correlated Attack Kill Chain\n\n{attack_chain}\n"
+                    ai_file.write_text(content, encoding="utf-8")
+                else:
+                    console.warning(f"Could not connect to Ollama at '{llm.base_url}'.")
+
+            asyncio.run(_run_ai())
+
+        # Generate Reports
+        reports_dir = scan_dir / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        generator = ReportGenerator(
+            db,
+            scan_id,
+            scan_dir,
+            ai_summary=ai_summary,
+            ai_model=ai_model_name,
+            attack_chain=attack_chain,
+        )
+        reports = generator.generate_all()
+        if "html" in reports:
+            console.success(f"HTML report: {reports['html']}")
+        if "markdown" in reports:
+            console.success(f"Markdown report: {reports['markdown']}")
+        if "json" in reports:
+            console.success(f"JSON report: {reports['json']}")
+        console.success(f"All reports saved to: {reports_dir}")
+    finally:
+        db.close()
+
+
+@cli.command()
+@click.argument("scan_path_or_id")
+@click.option("--ai-url", type=str, help="Ollama server URL (e.g. http://<GPU_IP>:11434)")
+@click.option("--ai-model", type=str, help="Ollama model name (e.g. deepseek-r1:8b)")
+@click.pass_context
+def agent(ctx: click.Context, scan_path_or_id: str, ai_url: str | None, ai_model: str | None) -> None:
+    """Autonomous AI Red Team Operator Agent (Attack surface reasoning & campaign planning)."""
+    console: ReconConsole = ctx.obj["console"]
+    config_mgr: ConfigManager = ctx.obj["config_mgr"]
+
+    # 1. Locate scan directory and database
+    cand = Path(scan_path_or_id)
+    scan_dir = None
+    if cand.is_dir() and (cand / "reconai.db").exists():
+        scan_dir = cand.resolve()
+    else:
+        base_out = Path(config_mgr.config.output.base_dir)
+        for p in base_out.rglob(scan_path_or_id):
+            if p.is_dir() and (p / "reconai.db").exists():
+                scan_dir = p.resolve()
+                break
+
+    if not scan_dir:
+        console.error(f"Scan directory with 'reconai.db' not found for: {scan_path_or_id}")
+        sys.exit(1)
+
+    from reconai.core.database.manager import DatabaseManager
+    from reconai.ai.local import OllamaAdapter
+    from reconai.ai.agent import RedTeamAgent
+
+    db = DatabaseManager(db_path=scan_dir / "reconai.db")
+    try:
+        scans = db.list_scans(limit=1)
+        scan_id = scans[0]["id"] if scans else scan_dir.name
+        target = scans[0]["target"] if scans else scan_dir.parent.name
+
+        effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
+        effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
         llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
 
-        async def _run_ai() -> None:
-            nonlocal ai_summary, ai_model_name, attack_chain
-            if await llm.is_available():
-                ai_model_name = llm.model
-                console.info(f"Running AI analysis with LLM ('{llm.model}') at {llm.base_url}...")
-                analyzer = Analyzer(llm, db, scan_id)
-                ai_summary = await analyzer.summarize_findings()
-                attack_chain = await analyzer.generate_attack_chain()
-                console.console.print(f"\n[bold cyan]AI Summary ({llm.model} @ {llm.base_url}):[/bold cyan]\n{ai_summary}\n")
-                if attack_chain and "Not enough findings" not in attack_chain:
-                    console.console.print(f"\n[bold magenta]AI Correlated Attack Kill Chain ({llm.model}):[/bold magenta]\n{attack_chain}\n")
-                reports_dir = scan_dir / "reports"
-                reports_dir.mkdir(parents=True, exist_ok=True)
-                ai_file = reports_dir / "ai_analysis.md"
-                content = f"# AI Threat Assessment: {target}\n\n**Model:** `{llm.model}` (`{llm.base_url}`)\n\n{ai_summary}\n"
-                if attack_chain and "Not enough findings" not in attack_chain:
-                    content += f"\n## Correlated Attack Kill Chain\n\n{attack_chain}\n"
-                ai_file.write_text(content, encoding="utf-8")
+        console.banner()
+        console.info(f"Initializing AI Red Team Autonomous Agent for: [bold cyan]{target}[/bold cyan] (Scan: {scan_id})")
+
+        async def _run() -> None:
+            has_ai = await llm.is_available()
+            if not has_ai:
+                console.warning(f"Ollama server not reachable at '{llm.base_url}'. Running deterministic attack graph reasoning engine...")
             else:
-                console.warning(f"Could not connect to Ollama at '{llm.base_url}'.")
+                console.info(f"Connected to Red Team Brain model '{llm.model}' at {llm.base_url}.")
 
-        asyncio.run(_run_ai())
+            agent_engine = RedTeamAgent(db, scan_id, ai=llm if has_ai else None)
+            result = await agent_engine.run_campaign_analysis()
 
-    # Generate Reports
-    reports_dir = scan_dir / "reports"
-    reports_dir.mkdir(parents=True, exist_ok=True)
-    generator = ReportGenerator(
-        db,
-        scan_id,
-        scan_dir,
-        ai_summary=ai_summary,
-        ai_model=ai_model_name,
-        attack_chain=attack_chain,
-    )
-    reports = generator.generate_all()
-    if "html" in reports:
-        console.success(f"HTML report: {reports['html']}")
-    if "markdown" in reports:
-        console.success(f"Markdown report: {reports['markdown']}")
-    if "json" in reports:
-        console.success(f"JSON report: {reports['json']}")
-    console.success(f"All reports saved to: {reports_dir}")
+            plan_md = result["plan_markdown"]
+            console.console.print(f"\n[bold magenta]Autonomous Red Team Campaign Plan:[/bold magenta]\n\n{plan_md}\n")
+
+            reports_dir = scan_dir / "reports"
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            plan_file = reports_dir / "red_team_plan.md"
+            plan_file.write_text(plan_md, encoding="utf-8")
+            console.success(f"Red Team Plan saved to: {plan_file}")
+
+        asyncio.run(_run())
+    finally:
+        db.close()
+
+
+@cli.command()
+@click.argument("scan_path_or_id")
+@click.option("--ai-url", type=str, help="Ollama server URL (e.g. http://<GPU_IP>:11434)")
+@click.option("--ai-model", type=str, help="Ollama model name (e.g. deepseek-r1:8b)")
+@click.pass_context
+def verify(ctx: click.Context, scan_path_or_id: str, ai_url: str | None, ai_model: str | None) -> None:
+    """Closed-Loop Safe Vulnerability Verifier (Eliminates false positives with non-destructive validation)."""
+    console: ReconConsole = ctx.obj["console"]
+    config_mgr: ConfigManager = ctx.obj["config_mgr"]
+
+    cand = Path(scan_path_or_id)
+    scan_dir = None
+    if cand.is_dir() and (cand / "reconai.db").exists():
+        scan_dir = cand.resolve()
+    else:
+        base_out = Path(config_mgr.config.output.base_dir)
+        for p in base_out.rglob(scan_path_or_id):
+            if p.is_dir() and (p / "reconai.db").exists():
+                scan_dir = p.resolve()
+                break
+
+    if not scan_dir:
+        console.error(f"Scan directory with 'reconai.db' not found for: {scan_path_or_id}")
+        sys.exit(1)
+
+    from reconai.core.database.manager import DatabaseManager
+    from reconai.ai.local import OllamaAdapter
+    from reconai.ai.verifier import ClosedLoopVerifier
+
+    db = DatabaseManager(db_path=scan_dir / "reconai.db")
+    try:
+        scans = db.list_scans(limit=1)
+        scan_id = scans[0]["id"] if scans else scan_dir.name
+        target = scans[0]["target"] if scans else scan_dir.parent.name
+
+        effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
+        effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
+        llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
+
+        console.banner()
+        console.info(f"Running Closed-Loop False-Positive Verification for: [bold cyan]{target}[/bold cyan]")
+
+        async def _run() -> None:
+            has_ai = await llm.is_available()
+            verifier = ClosedLoopVerifier(db, scan_id, ai=llm if has_ai else None)
+            results = await verifier.verify_all_findings()
+
+            verified_count = sum(1 for r in results if r.get("verified"))
+            console.success(f"Verification complete: {verified_count}/{len(results)} findings confirmed.")
+
+            for r in results:
+                tag = "[bold green][VERIFIED][/bold green]" if r.get("verified") else "[yellow][UNVERIFIED / POTENTIAL][/yellow]"
+                console.console.print(f"  {tag} {r.get('title')} ({r.get('asset')})")
+                if r.get("evidence"):
+                    console.console.print(f"    [dim]Evidence: {r.get('evidence')[:120]}[/dim]")
+
+        asyncio.run(_run())
+    finally:
+        db.close()
+
+
+@cli.command()
+@click.pass_context
+def mcp(ctx: click.Context) -> None:
+    """Start the Model Context Protocol (MCP) server for external AI agents."""
+    from reconai.mcp.server import run_mcp_server
+    run_mcp_server()
+
+
+@cli.command("threat-profile")
+@click.argument("scan_path_or_id")
+@click.option("--ai-url", type=str, help="Ollama server URL (e.g. http://<GPU_IP>:11434)")
+@click.option("--ai-model", type=str, help="Ollama model name (e.g. deepseek-r1:8b)")
+@click.pass_context
+def threat_profile(ctx: click.Context, scan_path_or_id: str, ai_url: str | None, ai_model: str | None) -> None:
+    """AI Threat Actor & TTP Profiler (Adversary emulation & MITRE ATT&CK mapping)."""
+    console: ReconConsole = ctx.obj["console"]
+    config_mgr: ConfigManager = ctx.obj["config_mgr"]
+
+    cand = Path(scan_path_or_id)
+    scan_dir = None
+    if cand.is_dir() and (cand / "reconai.db").exists():
+        scan_dir = cand.resolve()
+    else:
+        base_out = Path(config_mgr.config.output.base_dir)
+        for p in base_out.rglob(scan_path_or_id):
+            if p.is_dir() and (p / "reconai.db").exists():
+                scan_dir = p.resolve()
+                break
+
+    if not scan_dir:
+        console.error(f"Scan directory with 'reconai.db' not found for: {scan_path_or_id}")
+        sys.exit(1)
+
+    from reconai.core.database.manager import DatabaseManager
+    from reconai.ai.local import OllamaAdapter
+    from reconai.ai.threat_profiler import ThreatActorProfiler
+
+    db = DatabaseManager(db_path=scan_dir / "reconai.db")
+    try:
+        scans = db.list_scans(limit=1)
+        scan_id = scans[0]["id"] if scans else scan_dir.name
+        target = scans[0]["target"] if scans else scan_dir.parent.name
+
+        effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
+        effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
+        llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
+
+        console.banner()
+        console.info(f"Synthesizing Threat Actor Profiles for: [bold cyan]{target}[/bold cyan]")
+
+        async def _run() -> None:
+            has_ai = await llm.is_available()
+            profiler = ThreatActorProfiler(db, scan_id, ai=llm if has_ai else None)
+            result = await profiler.generate_threat_profile()
+
+            console.console.print(f"\n[bold magenta]Relevant Threat Actor Groups & Motives:[/bold magenta]")
+            for a in result["relevant_actors"]:
+                console.console.print(f"  • [bold red]{a['actor']}[/bold red] — [dim]{a['motive']}[/dim]")
+                console.console.print(f"    [yellow]{a['technique']}[/yellow]")
+
+            console.console.print(f"\n[bold cyan]Adversary Emulation Strategy:[/bold cyan]\n")
+            console.console.print(result["narrative_markdown"])
+
+        asyncio.run(_run())
+    finally:
+        db.close()
+
+
+@cli.command("prioritize")
+@click.argument("scan_path_or_id")
+@click.option("--limit", type=int, default=25, help="Number of priority endpoints to display")
+@click.pass_context
+def prioritize(ctx: click.Context, scan_path_or_id: str, limit: int) -> None:
+    """AI Smart Attack Surface & URL Prioritizer (Focus fuzzers on high-value targets)."""
+    console: ReconConsole = ctx.obj["console"]
+    config_mgr: ConfigManager = ctx.obj["config_mgr"]
+
+    cand = Path(scan_path_or_id)
+    scan_dir = None
+    if cand.is_dir() and (cand / "reconai.db").exists():
+        scan_dir = cand.resolve()
+    else:
+        base_out = Path(config_mgr.config.output.base_dir)
+        for p in base_out.rglob(scan_path_or_id):
+            if p.is_dir() and (p / "reconai.db").exists():
+                scan_dir = p.resolve()
+                break
+
+    if not scan_dir:
+        console.error(f"Scan directory with 'reconai.db' not found for: {scan_path_or_id}")
+        sys.exit(1)
+
+    from reconai.core.database.manager import DatabaseManager
+    from reconai.ai.fuzz_optimizer import AttackSurfacePrioritizer
+
+    db = DatabaseManager(db_path=scan_dir / "reconai.db")
+    try:
+        scans = db.list_scans(limit=1)
+        scan_id = scans[0]["id"] if scans else scan_dir.name
+        target = scans[0]["target"] if scans else scan_dir.parent.name
+
+        console.banner()
+        console.info(f"Prioritizing Attack Surface Endpoints for: [bold cyan]{target}[/bold cyan]")
+
+        prioritizer = AttackSurfacePrioritizer(db, scan_id)
+        endpoints = prioritizer.prioritize_endpoints(limit=limit)
+
+        if not endpoints:
+            console.warning("No crawled URLs or API endpoints found to prioritize.")
+            return
+
+        console.success(f"Ranked {len(endpoints)} high-leverage entry points for fuzzing & testing:\n")
+        for idx, ep in enumerate(endpoints, start=1):
+            prio_color = "red" if ep["priority"] == "CRITICAL" else ("yellow" if ep["priority"] == "HIGH" else "cyan")
+            console.console.print(f"[{prio_color}][{ep['priority']} - Score {ep['score']}][/{prio_color}] #{idx}: {ep['url']}")
+            if ep["categories"]:
+                console.console.print(f"  [dim]Category:[/dim] {', '.join(ep['categories'])}")
+            if ep["suggested_vectors"]:
+                console.console.print(f"  [bold green]Test Vectors:[/bold green] {', '.join(ep['suggested_vectors'])}")
+            console.console.print("")
+    finally:
+        db.close()
+
+
+@cli.command("waf-advisor")
+@click.argument("scan_path_or_id")
+@click.option("--ai-url", type=str, help="Ollama server URL (e.g. http://<GPU_IP>:11434)")
+@click.option("--ai-model", type=str, help="Ollama model name (e.g. deepseek-r1:8b)")
+@click.pass_context
+def waf_advisor(ctx: click.Context, scan_path_or_id: str, ai_url: str | None, ai_model: str | None) -> None:
+    """AI WAF & Perimeter Evasion Strategy Advisor (Origin IP leakage & bypass vectors)."""
+    console: ReconConsole = ctx.obj["console"]
+    config_mgr: ConfigManager = ctx.obj["config_mgr"]
+
+    cand = Path(scan_path_or_id)
+    scan_dir = None
+    if cand.is_dir() and (cand / "reconai.db").exists():
+        scan_dir = cand.resolve()
+    else:
+        base_out = Path(config_mgr.config.output.base_dir)
+        for p in base_out.rglob(scan_path_or_id):
+            if p.is_dir() and (p / "reconai.db").exists():
+                scan_dir = p.resolve()
+                break
+
+    if not scan_dir:
+        console.error(f"Scan directory with 'reconai.db' not found for: {scan_path_or_id}")
+        sys.exit(1)
+
+    from reconai.core.database.manager import DatabaseManager
+    from reconai.ai.local import OllamaAdapter
+    from reconai.ai.defensive_advisor import DefensiveAdvisor
+
+    db = DatabaseManager(db_path=scan_dir / "reconai.db")
+    try:
+        scans = db.list_scans(limit=1)
+        scan_id = scans[0]["id"] if scans else scan_dir.name
+        target = scans[0]["target"] if scans else scan_dir.parent.name
+
+        effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
+        effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
+        llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
+
+        console.banner()
+        console.info(f"Analyzing Perimeter Defenses & Origin Leakage for: [bold cyan]{target}[/bold cyan]")
+
+        async def _run() -> None:
+            has_ai = await llm.is_available()
+            advisor = DefensiveAdvisor(db, scan_id, ai=llm if has_ai else None)
+            result = await advisor.analyze_perimeter_defenses()
+
+            console.console.print(f"\n[bold magenta]Perimeter Defense Advisory:[/bold magenta]\n")
+            console.console.print(result["narrative_markdown"])
+
+            if result["potential_origin_ips"]:
+                console.console.print("[bold red]Potential Direct Origin IP Leakage Detected:[/bold red]")
+                for o in result["potential_origin_ips"]:
+                    console.console.print(f"  • [bold yellow]{o['ip']}[/bold yellow] ({o['asn_org']}) — {o['note']}")
+
+        asyncio.run(_run())
+    finally:
+        db.close()
+
+
+@cli.command("chat")
+@click.argument("scan_path_or_id")
+@click.option("--ai-url", type=str, help="Ollama server URL (e.g. http://<GPU_IP>:11434)")
+@click.option("--ai-model", type=str, help="Ollama model name (e.g. deepseek-r1:8b)")
+@click.pass_context
+def chat(ctx: click.Context, scan_path_or_id: str, ai_url: str | None, ai_model: str | None) -> None:
+    """Interactive Red Team AI Copilot (Ask questions about scan findings, attack depth, & verification)."""
+    console: ReconConsole = ctx.obj["console"]
+    config_mgr: ConfigManager = ctx.obj["config_mgr"]
+
+    cand = Path(scan_path_or_id)
+    scan_dir = None
+    if cand.is_dir() and (cand / "reconai.db").exists():
+        scan_dir = cand.resolve()
+    else:
+        base_out = Path(config_mgr.config.output.base_dir)
+        for p in base_out.rglob(scan_path_or_id):
+            if p.is_dir() and (p / "reconai.db").exists():
+                scan_dir = p.resolve()
+                break
+
+    if not scan_dir:
+        console.error(f"Scan directory with 'reconai.db' not found for: {scan_path_or_id}")
+        sys.exit(1)
+
+    from reconai.core.database.manager import DatabaseManager
+    from reconai.ai.local import OllamaAdapter
+    from reconai.ai.copilot import ReconCopilot
+
+    db = DatabaseManager(db_path=scan_dir / "reconai.db")
+    try:
+        scans = db.list_scans(limit=1)
+        scan_id = scans[0]["id"] if scans else scan_dir.name
+        target = scans[0]["target"] if scans else scan_dir.parent.name
+
+        effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
+        effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
+        llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
+
+        console.banner()
+
+        async def _run_session() -> None:
+            has_ai = await llm.is_available()
+            engine_label = f"Local/Remote LLM ('{llm.model}' @ {llm.base_url})" if has_ai else "Deterministic Grounded Intelligence"
+            
+            console.console.print(f"[bold cyan]🤖 ReconAI Red Team Copilot — Interactive Assessment Session[/bold cyan]")
+            console.console.print(f"[dim]Target: {target} | Scan: {scan_id} | Brain: {engine_label}[/dim]\n")
+            console.console.print("[dim]Commands: '/summary', '/findings', '/paths', '/help', or type 'exit' to quit.[/dim]\n")
+
+            copilot = ReconCopilot(db, scan_id, ai=llm if has_ai else None)
+
+            while True:
+                try:
+                    user_msg = click.prompt(click.style("You ❯", fg="green", bold=True), type=str).strip()
+                except (KeyboardInterrupt, EOFError):
+                    console.console.print("\n[dim]Session closed.[/dim]")
+                    break
+
+                if not user_msg:
+                    continue
+
+                if user_msg.lower() in ("exit", "quit", "q", ":q"):
+                    console.console.print("[dim]Exiting ReconAI Copilot session. Happy hunting![/dim]")
+                    break
+
+                with console.console.status("[bold cyan]Copilot is analyzing scan intelligence...[/bold cyan]"):
+                    reply = await copilot.ask(user_msg)
+
+                console.console.print(f"\n[bold cyan]Copilot ❯[/bold cyan]\n{reply}\n")
+
+        asyncio.run(_run_session())
+    finally:
+        db.close()
+
+
+@cli.command("copilot")
+@click.argument("scan_path_or_id")
+@click.option("--ai-url", type=str, help="Ollama server URL (e.g. http://<GPU_IP>:11434)")
+@click.option("--ai-model", type=str, help="Ollama model name (e.g. deepseek-r1:8b)")
+@click.pass_context
+def copilot_cmd(ctx: click.Context, scan_path_or_id: str, ai_url: str | None, ai_model: str | None) -> None:
+    """Interactive Red Team AI Copilot (alias for chat)."""
+    ctx.invoke(chat, scan_path_or_id=scan_path_or_id, ai_url=ai_url, ai_model=ai_model)
+
+
+@cli.command("ai-agent")
+@click.argument("scan_path_or_id")
+@click.option("--ai-url", type=str, help="Ollama server URL (e.g. http://<GPU_IP>:11434)")
+@click.option("--ai-model", type=str, help="Ollama model name (e.g. deepseek-r1:8b)")
+@click.pass_context
+def ai_agent_cmd(ctx: click.Context, scan_path_or_id: str, ai_url: str | None, ai_model: str | None) -> None:
+    """Autonomous AI Red Team Operator Agent (alias for agent)."""
+    ctx.invoke(agent, scan_path_or_id=scan_path_or_id, ai_url=ai_url, ai_model=ai_model)
+
+
+@cli.command("profile-threat")
+@click.argument("scan_path_or_id")
+@click.option("--ai-url", type=str, help="Ollama server URL (e.g. http://<GPU_IP>:11434)")
+@click.option("--ai-model", type=str, help="Ollama model name (e.g. deepseek-r1:8b)")
+@click.pass_context
+def profile_threat_cmd(ctx: click.Context, scan_path_or_id: str, ai_url: str | None, ai_model: str | None) -> None:
+    """AI Threat Actor & TTP Profiler (alias for threat-profile)."""
+    ctx.invoke(threat_profile, scan_path_or_id=scan_path_or_id, ai_url=ai_url, ai_model=ai_model)
 
 
 if __name__ == "__main__":

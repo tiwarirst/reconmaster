@@ -1,30 +1,72 @@
-# ReconAI Default Configuration
-# Customize this file and run: reconai scan example.com --config config.yaml
+# ════════════════════════════════════════════════════════════════════════════════
+# ReconAI Platform Configuration
+# ════════════════════════════════════════════════════════════════════════════════
+# Usage:
+#   reconai scan example.com --config config.yaml
+#   reconai scan example.com -m deep --config config.yaml
+#   reconai doctor
+#
+# Core Principles: Fast, Fail-Safe, and Modular.
+# All external binaries and API keys are completely optional.
+# If a tool binary is not installed, ReconAI automatically invokes its pure-Python
+# offline fallback engine without failing or interrupting your scan.
+# ════════════════════════════════════════════════════════════════════════════════
 
+# ── Operational Timeouts (seconds) ──────────────────────────────────────────────
 timeouts:
   dns_query: 10
+  whois_rdap: 20
   http_probe: 30
   nmap_quick: 60
   nmap_standard: 120
+  nmap_service: 180
+  nmap_full: 600
+  web_crawler: 90
+  directory_discovery: 90
+  technology_detection: 30
+  browser_page: 45
+  http_request: 15
+  certificate_query: 20
   subdomain_tool: 120
+  cloud_bucket_enum: 180
+  cloud_enum_tool: 120
+  cloud_metadata_ssrf: 90
+  cloud_iam_analysis: 60
   default: 60
 
+# ── Concurrency & Parallelism ──────────────────────────────────────────────────
 concurrency:
   dns: 20
   http: 20
   crawler: 10
+  browser: 2
   subdomain: 5
+  port_scan: 3
+  directory: 10
+  cloud_bucket: 15
+  cloud_ssrf: 5
+  default: 10
 
+# ── Safe Rate Limiting (requests per second) ────────────────────────────────────
 rate_limits:
   http: 20
   dns: 50
   crawler: 10
+  directory: 15
+  default: 10
 
+# ── Hard Scan Boundaries & Guard Limits ────────────────────────────────────────
 scan_limits:
   max_depth: 2
   max_pages: 500
   max_urls: 5000
+  max_subdomains: 10000
+  max_ports_per_host: 65535
+  max_directory_depth: 3
+  max_js_files: 200
+  max_requests_per_module: 10000
 
+# ── Reporting & Output Directory ────────────────────────────────────────────────
 output:
   base_dir: "output"
   save_raw: true
@@ -32,20 +74,212 @@ output:
   save_logs: true
   report_formats: ["html", "json", "md"]
 
+# ── Caching & Response Preservation ────────────────────────────────────────────
 cache:
   enabled: true
   ttl_dns: 3600
   ttl_http: 1800
+  ttl_certificate: 86400
+  ttl_technology: 3600
+  ttl_default: 1800
 
-# Optional API Keys (Not required for core functionality)
+# ════════════════════════════════════════════════════════════════════════════════
+# External Security & Offensive Tools Registry
+# ════════════════════════════════════════════════════════════════════════════════
+# Configure custom paths (e.g. C:\tools\nuclei.exe or /usr/local/bin/httpx)
+# or disable specific tools if you prefer purely passive/Python execution.
+# Run `reconai doctor` to see real-time tool availability and one-line install commands.
+# ════════════════════════════════════════════════════════════════════════════════
+tools:
+  # ── Active HTTP & Asset Probing ──────────────────────────────
+  httpx:
+    enabled: true
+    path: ""               # Auto-detected via PATH or specify e.g. "httpx" / "C:\\tools\\httpx.exe"
+    threads: 30
+    rate_limit: 150
+    timeout: 10
+    extra_args: ["-tech-detect", "-status-code", "-title", "-follow-redirects"]
+
+  tlsx:
+    enabled: true
+    path: ""               # ProjectDiscovery tlsx (TLS grabber, SAN extractor, JARM)
+    threads: 20
+    timeout: 10
+    extra_args: ["-san", "-cn", "-resp-version", "-jarm", "-expired"]
+
+  # ── Port & Service Discovery ─────────────────────────────────
+  naabu:
+    enabled: true
+    path: ""               # ProjectDiscovery naabu (fast SYN/CONNECT port scanner)
+    rate_limit: 1000
+    timeout: 120
+    extra_args: ["-top-ports", "1000", "-warm-up-time", "2"]
+
+  nmap:
+    enabled: true
+    path: ""               # Network mapper & service version identifier
+    timeout: 180
+    extra_args: ["-T3", "-sV", "--version-light"]
+
+  # ── Subdomain & DNS Intelligence ─────────────────────────────
+  subfinder:
+    enabled: true
+    path: ""               # Passive subdomain discovery tool
+    threads: 10
+    timeout: 120
+    extra_args: ["-all"]
+
+  dnsx:
+    enabled: true
+    path: ""               # Multi-purpose DNS toolkit & high-speed resolver
+    threads: 25
+    timeout: 60
+    extra_args: ["-resp", "-rcode", "noerror"]
+
+  amass:
+    enabled: true
+    path: ""               # OWASP Amass in-depth network mapping
+    timeout: 180
+    extra_args: ["enum", "-passive"]
+
+  # ── Web Surface, Crawling & Parameter Mining ──────────────────
+  katana:
+    enabled: true
+    path: ""               # ProjectDiscovery katana (next-gen web crawler & spider)
+    threads: 10
+    timeout: 90
+    extra_args: ["-depth", "3", "-automatic-form-fill"]
+
+  arjun:
+    enabled: true
+    path: ""               # Hidden HTTP parameter discovery suite
+    threads: 5
+    timeout: 60
+    extra_args: ["--passive"]
+
+  ffuf:
+    enabled: true
+    path: ""               # Fast web fuzzer & directory brute-forcer
+    threads: 20
+    rate_limit: 50
+    timeout: 90
+    extra_args: ["-mc", "200,204,301,302,307,401,403"]
+
+  gau:
+    enabled: true
+    path: ""               # GetAllUrls (AlienVault, Wayback, CommonCrawl aggregator)
+    threads: 5
+    timeout: 60
+    extra_args: ["--subs"]
+
+  waybackurls:
+    enabled: true
+    path: ""               # Archive URL harvester
+    timeout: 60
+
+  paramspider:
+    enabled: true
+    path: ""               # Parameter mining from web archives
+    timeout: 60
+
+  whatweb:
+    enabled: true
+    path: ""               # Next-gen web scanner & technology identifier
+    timeout: 30
+
+  wafw00f:
+    enabled: true
+    path: ""               # Web Application Firewall fingerprinting tool
+    timeout: 30
+
+  gowitness:
+    enabled: true
+    path: ""               # Headless Chrome web screenshot utility
+    timeout: 45
+    extra_args: ["--screenshot-format", "png"]
+
+  # ── Vulnerability, Secret & Cloud Exploitation ───────────────
+  nuclei:
+    enabled: true
+    path: ""               # Fast and customizable vulnerability scanner
+    rate_limit: 150
+    timeout: 180
+    extra_args: ["-severity", "info,low,medium,high,critical", "-stats"]
+
+  dalfox:
+    enabled: true
+    path: ""               # Parameter analysis & XSS scanner
+    threads: 10
+    timeout: 60
+    extra_args: ["--skip-bav", "--silence"]
+
+  sqlmap:
+    enabled: true
+    path: ""               # Automatic SQL injection & database takeover tool
+    timeout: 120
+    extra_args: ["--batch", "--level=1", "--risk=1"]
+
+  subzy:
+    enabled: true
+    path: ""               # Subdomain takeover vulnerability checker
+    threads: 15
+    timeout: 45
+    extra_args: ["--hide_fails"]
+
+  gitleaks:
+    enabled: true
+    path: ""               # Ultra-fast secret & credential detector
+    timeout: 60
+    extra_args: ["detect", "--no-git"]
+
+  trufflehog:
+    enabled: true
+    path: ""               # Deep secret scanner with verification
+    timeout: 60
+
+  cloud_enum:
+    enabled: true
+    path: ""               # Multi-cloud OSINT (AWS S3, Azure Blob, Google Cloud Storage)
+    threads: 10
+    timeout: 120
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Optional Threat Intelligence & OSINT API Keys
+# ════════════════════════════════════════════════════════════════════════════════
+# None of these are required for ReconAI to run. If left empty (""), ReconAI
+# uses free public OSINT endpoints (crt.sh, HackerTarget, AlienVault, Wayback CDX,
+# RDAP, DNS). Adding your personal free or paid keys unlocks extended data limits.
+# ════════════════════════════════════════════════════════════════════════════════
 api_keys:
-  shodan: ""
-  virustotal: ""
+  shodan: ""               # https://account.shodan.io
+  virustotal: ""           # https://www.virustotal.com/gui/my-apikey
+  censys_id: ""            # https://search.censys.io/account/api
+  censys_secret: ""
+  securitytrails: ""       # https://securitytrails.com/app/account/credentials
+  github: ""               # Personal Access Token for GitHub secret searching
+  chaos: ""                # ProjectDiscovery Chaos API key
+  binaryedge: ""           # https://app.binaryedge.io/account/api-tokens
+  alienvault: ""           # https://otx.alienvault.com/api
+  hunter_io: ""            # https://hunter.io/api-keys
+  whoisxml: ""             # https://whois.whoisxmlapi.com/
 
-# AI Intelligence Configuration (Local or Remote GPU machine)
+# ════════════════════════════════════════════════════════════════════════════════
+# AI Red Team Intelligence & Autonomous Analysis
+# ════════════════════════════════════════════════════════════════════════════════
+# ReconAI connects to local or remote Ollama LLMs with 100% operational autonomy.
+# Red Teaming / Offensive Security Recommended Models:
+#   - llama3               (Fast general reasoning, correlation & reporting)
+#   - deepseek-r1:7b       (Deep reasoning & vulnerability attack-chain synthesis)
+#   - mistral              (Compact, high precision technical analysis)
+#   - dolphin-llama3       (Uncensored offensive posture & exploitation analysis)
+#   - qwen2.5-coder:7b     (Deep script, payload, & source code comprehension)
+#
+# Remote GPU host:
+#   Set OLLAMA_HOST=0.0.0.0:11434 on your GPU machine and specify URL below:
+#   url: "http://192.168.1.50:11434"
+# ════════════════════════════════════════════════════════════════════════════════
 ai:
   enabled: false
-  # Set to your remote GPU machine IP (e.g. http://192.168.1.50:11434)
-  # or keep http://localhost:11434 if using SSH tunnel (ssh -L 11434:localhost:11434 user@gpu-host)
+  provider: "ollama"
   url: "http://localhost:11434"
   model: "llama3"

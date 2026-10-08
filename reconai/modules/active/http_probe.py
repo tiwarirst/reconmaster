@@ -54,13 +54,44 @@ class HTTPProbeModule(ReconModule):
         start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{len(hosts)} hosts")
 
-        semaphore = asyncio.Semaphore(40)
+        from reconai.integrations.httpx import HttpxAdapter
+        adapter = HttpxAdapter(self.runner)
+        has_cli = await adapter.is_available()
 
-        async with httpx.AsyncClient(
-            verify=False, follow_redirects=False, timeout=10.0
-        ) as client:
-            tasks = [self._probe_host(client, semaphore, host) for host in hosts[:1000]]
-            await asyncio.gather(*tasks, return_exceptions=True)
+        if has_cli and len(hosts) > 10:
+            import tempfile
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as tf_in:
+                tf_in.write("\n".join(hosts[:1000]))
+                targets_file = Path(tf_in.name)
+            with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf_out:
+                output_file = Path(tf_out.name)
+            try:
+                cmd = adapter.build_command(targets_file=targets_file, output_file=output_file)
+                await self.runner.run(command=cmd, timeout=self.timeout)
+                urls, techs = adapter.parse_output_file(output_file)
+                for u in urls:
+                    u.scan_id = self.scan_id
+                    self.db.insert_url(u)
+                    await self.events.emit_discovery(
+                        event_type=EventType.URL_DISCOVERED,
+                        source="httpx_cli",
+                        data={"url": u.url, "status": u.status_code, "title": u.title},
+                        scan_id=self.scan_id,
+                        target=self.target,
+                    )
+                for t in techs:
+                    t.scan_id = self.scan_id
+                    self.db.insert_technology(t)
+            finally:
+                targets_file.unlink(missing_ok=True)
+                output_file.unlink(missing_ok=True)
+        else:
+            semaphore = asyncio.Semaphore(40)
+            async with httpx.AsyncClient(
+                verify=False, follow_redirects=False, timeout=10.0
+            ) as client:
+                tasks = [self._probe_host(client, semaphore, host) for host in hosts[:1000]]
+                await asyncio.gather(*tasks, return_exceptions=True)
 
         duration = time.monotonic() - start
         self.logger.module_complete(self.config.name, duration=duration)

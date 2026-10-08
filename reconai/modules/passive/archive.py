@@ -13,6 +13,7 @@ import httpx
 
 from reconai.core.database.models import URLRecord
 from reconai.core.events.types import EventType
+from reconai.integrations.gau import GauAdapter
 from reconai.integrations.waybackurls import WaybackurlsAdapter
 from reconai.modules.base import ModuleConfig, ReconModule
 from reconai.modules.registry import register_module
@@ -23,7 +24,7 @@ class ArchiveModule(ReconModule):
     config = ModuleConfig(
         name="archive_urls",
         category="passive",
-        description="Discovers historical URLs via Wayback Machine (CLI or pure HTTP CDX API)",
+        description="Discovers historical URLs via gau / waybackurls CLI or pure HTTP CDX & OTX APIs",
         requires_tools=[],  # Optional: has built-in CDX HTTP fallback
         supports_timeout=True,
     )
@@ -38,22 +39,41 @@ class ArchiveModule(ReconModule):
         if not domains:
             return
 
-        adapter = WaybackurlsAdapter(self.runner)
-        has_wayback = await adapter.is_available()
+        gau_adapter = GauAdapter(self.runner)
+        wb_adapter = WaybackurlsAdapter(self.runner)
+        has_gau = await gau_adapter.is_available()
+        has_wayback = await wb_adapter.is_available()
 
         for domain in domains:
             start = time.monotonic()
             self.logger.module_start(self.config.name, target=domain)
 
             urls: list[str] = []
-            if has_wayback:
-                cmd = adapter.build_command(domain=domain)
-                result = await self.runner.run(command=cmd, timeout=60)
-                urls = adapter.parse(result)
+            if has_gau:
+                try:
+                    cmd = gau_adapter.build_command(domain=domain, threads=5)
+                    res = await self.runner.run(command=cmd, timeout=60)
+                    urls.extend(gau_adapter.parse(res))
+                except Exception:
+                    pass
+
+            if not urls and has_wayback:
+                try:
+                    cmd = wb_adapter.build_command(domain=domain)
+                    result = await self.runner.run(command=cmd, timeout=60)
+                    urls.extend(wb_adapter.parse(result))
+                except Exception:
+                    pass
 
             if not urls:
-                # Direct Wayback CDX JSON API fallback
-                urls = await self._query_cdx_api(domain)
+                # Direct Wayback CDX JSON API and AlienVault OTX fallback
+                cdx_task = self._query_cdx_api(domain)
+                otx_task = self._query_otx_api(domain)
+                cdx_res, otx_res = await asyncio.gather(cdx_task, otx_task, return_exceptions=True)
+                if isinstance(cdx_res, list):
+                    urls.extend(cdx_res)
+                if isinstance(otx_res, list):
+                    urls.extend(otx_res)
 
             # Deduplicate by path/query structure
             unique_urls = set()
@@ -99,6 +119,23 @@ class ArchiveModule(ReconModule):
                     for row in rows[1:]:
                         if row and isinstance(row, list):
                             found.append(row[0])
+        except Exception:
+            pass
+        return found
+
+    async def _query_otx_api(self, domain: str) -> list[str]:
+        """Query AlienVault OTX URL indicators API over HTTP without authentication."""
+        found: list[str] = []
+        url = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/url_list?limit=50&page=1"
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for entry in data.get("url_list", []):
+                        u = entry.get("url")
+                        if u and isinstance(u, str):
+                            found.append(u)
         except Exception:
             pass
         return found

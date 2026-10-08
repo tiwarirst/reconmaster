@@ -55,6 +55,11 @@ class ReportGenerator:
 
         correlation = CorrelationEngine(self.db, self.scan_id)
         data["asset_graph"] = correlation.build_graph()
+        data["attack_paths"] = correlation.find_attack_paths()
+
+        from reconai.ai.fuzz_optimizer import AttackSurfacePrioritizer
+        prioritizer = AttackSurfacePrioritizer(self.db, self.scan_id)
+        data["prioritized_endpoints"] = prioritizer.prioritize_endpoints(limit=25)
 
         if self.ai_summary or self.attack_chain:
             data["ai_analysis"] = {
@@ -147,6 +152,41 @@ class ReportGenerator:
                 lines.append("")
         else:
             lines.append("No correlated attack chains discovered.\n")
+
+        # ── Attack Paths & Choke Points ──────────────────────────────────
+        paths = correlation.find_attack_paths()
+        if paths:
+            lines.extend([
+                "## ⚔️ Critical Multi-Hop Attack Paths & Choke Points",
+                "",
+                "The following multi-hop pathways represent the highest-risk exposure trajectories from the public Internet:",
+                "",
+            ])
+            for idx, p in enumerate(paths[:10], start=1):
+                node_chain = " ➔ ".join([f"`{n['label']}`" for n in p.get("path_nodes", [])])
+                lines.extend([
+                    f"### Path #{idx}: [{p['severity']}] {p['type']}",
+                    f"- **Entry Point / Choke Point:** `{p['choke_point']}`",
+                    f"- **Target Asset / Vector:** `{p['target']}`",
+                    f"- **Attack Trajectory:** {node_chain}",
+                    "",
+                ])
+
+        # ── Prioritized High-Leverage Fuzzing Endpoints ──────────────────
+        from reconai.ai.fuzz_optimizer import AttackSurfacePrioritizer
+        prioritizer = AttackSurfacePrioritizer(self.db, self.scan_id)
+        prio_endpoints = prioritizer.prioritize_endpoints(limit=15)
+        if prio_endpoints:
+            lines.extend([
+                "## 🎯 Prioritized Attack Surface Endpoints (High-Leverage Fuzzing)",
+                "",
+                "| Priority | Score | Target URL | Suggested Vectors |",
+                "| :---: | :---: | :--- | :--- |",
+            ])
+            for ep in prio_endpoints:
+                vecs = ", ".join(ep["suggested_vectors"][:2])
+                lines.append(f"| **{ep['priority']}** | {ep['score']} | `{ep['url'][:80]}` | {vecs} |")
+            lines.append("")
 
         lines.extend([
             "## Findings",

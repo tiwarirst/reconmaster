@@ -109,6 +109,33 @@ class EventBus:
         )
         await self.emit(event, wait=wait)
 
+    async def emit_finding(
+        self,
+        source: str,
+        title: str,
+        severity: str,
+        affected_asset: str,
+        data: dict[str, Any] | None = None,
+        scan_id: str = "",
+        target: str = "",
+        wait: bool = False,
+    ) -> None:
+        """Convenience method for emitting security findings non-blockingly."""
+        finding_data = {
+            "title": title,
+            "severity": severity,
+            "affected_asset": affected_asset,
+            **(data or {}),
+        }
+        await self.emit_discovery(
+            event_type=EventType.FINDING_DISCOVERED,
+            source=source,
+            data=finding_data,
+            scan_id=scan_id,
+            target=target,
+            wait=wait,
+        )
+
     @staticmethod
     async def _safe_call(handler: EventHandler, event: Event) -> None:
         """Call a handler with error isolation."""

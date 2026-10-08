@@ -74,3 +74,22 @@ class OllamaAdapter(AIAdapter):
         except Exception:
             pass
         return ""
+
+    async def chat(self, messages: list[dict[str, str]]) -> str:
+        """Send multi-turn chat messages to Ollama /api/chat."""
+        try:
+            async with httpx.AsyncClient(timeout=180.0) as client:
+                resp = await client.post(
+                    f"{self.base_url}/api/chat",
+                    json={"model": self.model, "messages": messages, "stream": False},
+                )
+                if resp.status_code == 200:
+                    result: dict[str, Any] = resp.json()
+                    msg = result.get("message", {})
+                    return str(msg.get("content", "")).strip()
+        except Exception:
+            pass
+
+        # Fallback to single prompt generate
+        combined = "\n\n".join(f"[{m.get('role', 'user').upper()}]: {m.get('content', '')}" for m in messages)
+        return await self.analyze(combined)

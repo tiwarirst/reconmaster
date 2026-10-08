@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -287,15 +288,27 @@ class DatabaseManager:
 
     # ── Scan Operations ─────────────────────────────────────
 
-    def create_scan(self, scan: ScanRecord) -> str:
+    def create_scan(self, scan: ScanRecord | str, **kwargs: Any) -> str:
+        if isinstance(scan, str):
+            scan_obj = ScanRecord(
+                id=kwargs.get("id", uuid.uuid4().hex[:8]),
+                target=scan,
+                mode=kwargs.get("mode", "standard"),
+                profile=kwargs.get("profile", "quick"),
+                output_dir=kwargs.get("output_dir", ""),
+                metadata=kwargs.get("metadata", {}),
+            )
+        else:
+            scan_obj = scan
+
         self.conn.execute(
             "INSERT INTO scans (id, target, mode, profile, status, started_at, output_dir, metadata) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (scan.id, scan.target, scan.mode, scan.profile, scan.status.value,
-             scan.started_at.isoformat(), scan.output_dir, json.dumps(scan.metadata)),
+            (scan_obj.id, scan_obj.target, scan_obj.mode, scan_obj.profile, scan_obj.status.value,
+             scan_obj.started_at.isoformat(), scan_obj.output_dir, json.dumps(scan_obj.metadata)),
         )
         self.conn.commit()
-        return scan.id
+        return scan_obj.id
 
     def update_scan_status(self, scan_id: str, status: ScanStatus, **kwargs: Any) -> None:
         sets = ["status = ?"]

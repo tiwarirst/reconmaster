@@ -89,22 +89,22 @@ SCAN_PROFILES = {
 SCAN_MODES = {
     "passive": {
         "modules": [
-            "dns_enum", "whois", "cert_transparency", "archive_urls",
-            "paramspider", "dnsx", "email_security", "saas_enum",
+            "dns_enum", "whois", "asn_enum", "cert_transparency", "archive_urls",
+            "paramspider", "dnsx", "osint_fusion", "email_security", "saas_enum",
         ],
         "description": "Passive reconnaissance only — no direct target interaction",
     },
     "light": {
         "modules": [
-            "dns_enum", "whois", "cert_transparency", "archive_urls",
-            "dnsx", "http_probe", "email_security", "saas_enum",
+            "dns_enum", "whois", "asn_enum", "cert_transparency", "archive_urls",
+            "dnsx", "osint_fusion", "http_probe", "email_security", "saas_enum",
         ],
         "description": "Passive recon + lightweight HTTP probing",
     },
     "standard": {
         "modules": [
-            "dns_enum", "whois", "cert_transparency", "archive_urls",
-            "dnsx", "http_probe", "naabu_ports", "ports", "cdn_classifier",
+            "dns_enum", "whois", "asn_enum", "cert_transparency", "archive_urls",
+            "dnsx", "osint_fusion", "http_probe", "tls_probe", "naabu_ports", "ports", "cdn_classifier",
             "technologies", "headers", "waf_detection", "email_security",
             "saas_enum", "crawler", "directory_discovery", "api_miner", "dev_artifacts",
             "vuln_intelligence", "screenshot",
@@ -114,20 +114,20 @@ SCAN_MODES = {
     "deep": {
         "modules": [
             # Stage 1: Asset & Subdomain Discovery (Passive + Active)
-            "dns_enum", "whois", "cert_transparency", "archive_urls",
+            "dns_enum", "whois", "asn_enum", "cert_transparency", "archive_urls",
             "paramspider", "subdomains_active",
-            # Stage 2: DNS & IP Resolution
-            "dnsx",
+            # Stage 2: DNS & IP Resolution & Passive OSINT
+            "dnsx", "osint_fusion",
             # Stage 3: Service & Port Exposure
-            "http_probe", "naabu_ports", "ports", "cdn_classifier",
+            "http_probe", "tls_probe", "naabu_ports", "ports", "cdn_classifier",
             "email_security", "saas_enum",
             # Stage 4: Web Surface, Fingerprinting & Deep Crawl
             "technologies", "headers", "waf_detection",
             "crawler", "katana_crawler", "js_analysis",
             "ffuf_dir", "directory_discovery",
-            "api_miner", "dev_artifacts",
+            "api_miner", "dev_artifacts", "arjun_params",
             # Stage 5: Cloud Enumeration & Credential Analysis
-            "secrets", "iam_analyzer", "bucket_enum", "cloud_enum_module", "metadata_ssrf",
+            "secrets", "iam_analyzer", "bucket_enum", "cloud_enum_module", "subzy_takeover", "metadata_ssrf",
             # Stage 6: Vulnerability Assessment & Exploitation Validation
             "nuclei_vuln", "sqlmap", "dalfox", "vuln_intelligence",
             # Stage 7: Visual Verification
@@ -162,7 +162,8 @@ SCAN_MODES = {
             "http_probe", "cdn_classifier",
             # Phase 3: Cloud-specific enumeration
             "bucket_enum",          # Multi-cloud storage bucket brute-force
-            "cloud_enum_module",    # CNAME fingerprinting + dangling DNS takeover
+            "cloud_enum_module",    # CNAME fingerprinting + cloud enum
+            "subzy_takeover",       # Automated dangling CNAME takeover check
             # Phase 4: Credential discovery and exploitation paths
             "secrets",              # Find leaked credentials in JS/responses
             "metadata_ssrf",        # SSRF -> cloud metadata credential theft
@@ -178,7 +179,7 @@ SCAN_MODES = {
     },
     "subs": {
         "modules": [
-            "dns_enum", "cert_transparency", "archive_urls", "dnsx", "subdomains_active",
+            "dns_enum", "cert_transparency", "archive_urls", "dnsx", "tls_probe", "subdomains_active",
         ],
         "description": "Dedicated Subdomain Intelligence Pipeline — passive & active multi-engine subdomain discovery",
     },
@@ -191,14 +192,14 @@ SCAN_MODES = {
     "web": {
         "modules": [
             "http_probe", "technologies", "headers", "waf_detection", "crawler",
-            "directory_discovery", "api_miner", "dev_artifacts", "screenshot",
+            "directory_discovery", "api_miner", "dev_artifacts", "arjun_params", "screenshot",
         ],
         "description": "Dedicated Web Attack Surface Pipeline — deep crawling, tech stack fingerprinting, directory discovery, and visual screenshots",
     },
     "vuln": {
         "modules": [
             "http_probe", "api_miner", "dev_artifacts", "nuclei_vuln", "secrets",
-            "dalfox", "sqlmap", "vuln_intelligence",
+            "dalfox", "sqlmap", "subzy_takeover", "vuln_intelligence",
         ],
         "description": "Dedicated Vulnerability Pipeline — automated vulnerability assessment, exposed secret scanning, and exploit intelligence",
     },

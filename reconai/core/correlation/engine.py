@@ -230,3 +230,60 @@ class CorrelationEngine:
 
         return chains
 
+    def find_attack_paths(self) -> list[dict[str, Any]]:
+        """Compute critical multi-hop attack paths from perimeter to sensitive assets.
+        
+        Evaluates cumulative risk per path: Internet -> Host -> Service -> Vulnerability/Storage.
+        """
+        chains = self.get_correlated_chains()
+        paths: list[dict[str, Any]] = []
+
+        sev_scores = {"critical": 10, "high": 7, "medium": 4, "low": 2, "info": 1}
+
+        for chain in chains:
+            host = chain.get("host", "")
+            findings = chain.get("findings", [])
+            clouds = chain.get("cloud_assets", [])
+            ports = chain.get("ports", [])
+            ips = chain.get("ips", [])
+
+            # Path A: Findings on this host
+            for f in findings:
+                sev = str(f.get("severity", "info")).lower()
+                score = sev_scores.get(sev, 1)
+                paths.append({
+                    "entry_point": host,
+                    "target": f.get("title"),
+                    "type": "Vulnerability Path",
+                    "severity": sev.upper(),
+                    "score": score,
+                    "path_nodes": [
+                        {"label": "Internet Perimeter", "type": "entry"},
+                        {"label": host, "type": "subdomain"},
+                        {"label": ips[0] if ips else "Unknown IP", "type": "ip"},
+                        {"label": ports[0] if ports else "Web (80/443)", "type": "service"},
+                        {"label": f.get("title"), "type": "exploit", "severity": sev},
+                    ],
+                    "choke_point": host,
+                })
+
+            # Path B: Cloud assets linked to this host
+            for ca in clouds:
+                paths.append({
+                    "entry_point": host,
+                    "target": ca,
+                    "type": "Cloud Takeover / Access Path",
+                    "severity": "HIGH",
+                    "score": 8,
+                    "path_nodes": [
+                        {"label": "Internet Perimeter", "type": "entry"},
+                        {"label": host, "type": "subdomain"},
+                        {"label": ca, "type": "cloud_storage"},
+                    ],
+                    "choke_point": host,
+                })
+
+        # Sort paths by risk score descending
+        paths.sort(key=lambda x: x.get("score", 0), reverse=True)
+        return paths
+

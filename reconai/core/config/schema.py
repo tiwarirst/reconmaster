@@ -106,17 +106,64 @@ class CacheConfig(BaseModel):
         return getattr(self, attr, self.ttl_default)
 
 
+class ToolSettingConfig(BaseModel):
+    """Configuration for an external tool (path overrides, toggles, performance flags)."""
+    enabled: bool = True
+    path: str = ""
+    threads: int | None = None
+    rate_limit: int | None = None
+    timeout: int | None = None
+    extra_args: list[str] = Field(default_factory=list)
+
+
+class ToolsConfig(BaseModel):
+    """Offensive & reconnaissance tools configuration registry."""
+    nmap: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    nuclei: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    subfinder: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    httpx: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    naabu: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    dnsx: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    amass: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    katana: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    ffuf: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    dalfox: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    sqlmap: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    trufflehog: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    gitleaks: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    arjun: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    subzy: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    gowitness: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    wafw00f: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    cloud_enum: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    waybackurls: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    gau: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    tlsx: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    whatweb: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+    paramspider: ToolSettingConfig = Field(default_factory=ToolSettingConfig)
+
+    def get_tool(self, name: str) -> ToolSettingConfig:
+        """Retrieve tool configuration by binary name or return default."""
+        return getattr(self, name, ToolSettingConfig())
+
+
 class APIKeyConfig(BaseModel):
-    """Optional API key configuration — none required for core functionality."""
+    """Optional intelligence API keys — zero required for 100% core operation."""
     shodan: str = ""
     virustotal: str = ""
     censys_id: str = ""
     censys_secret: str = ""
     securitytrails: str = ""
+    github: str = ""
+    chaos: str = ""
+    binaryedge: str = ""
+    alienvault: str = ""
+    hunter_io: str = ""
+    whoisxml: str = ""
 
     def is_configured(self, service: str) -> bool:
         val = getattr(self, service, "")
-        return bool(val and val.strip())
+        return bool(val and str(val).strip())
 
 
 class AIConfig(BaseModel):
@@ -136,6 +183,7 @@ class ReconAIConfig(BaseModel):
     output: OutputConfig = Field(default_factory=OutputConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     api_keys: APIKeyConfig = Field(default_factory=APIKeyConfig)
+    tools: ToolsConfig = Field(default_factory=ToolsConfig)
     ai: AIConfig = Field(default_factory=AIConfig)
     debug: bool = False
     verbose: bool = False

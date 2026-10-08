@@ -123,7 +123,21 @@ class Analyzer:
             "3. Provides top 3 prioritized remediation actions with business justification\n"
             "Be specific, concise, and alarming where warranted."
         )
-        return await self.ai.analyze(prompt)
+        summary = await self.ai.analyze(prompt)
+        if summary:
+            return summary
+
+        # Deterministic offline fallback if AI adapter is unreachable or returns empty
+        cve_str = f" with {len(cves)} CVE associations" if cves else ""
+        return (
+            f"Automated security reconnaissance of {target_name} identified {len(findings)} vulnerability findings "
+            f"({len(critical)} Critical, {len(high)} High){cve_str}. Attack surface mapping revealed "
+            f"{stats.get('subdomains', 0)} subdomains, {stats.get('ports', 0)} open ports, and "
+            f"{stats.get('technologies', 0)} fingerprinted technologies.\n\n"
+            f"The primary attack vector involves high-severity perimeter exposure on {target_name}. "
+            f"Immediate containment and remediation should prioritize critical-severity findings "
+            f"to prevent unauthorized lateral movement and data exfiltration."
+        )
 
     # ─────────────────────────────────────────────────────────────────────
     # 2. Technical Finding Analysis (per-finding)

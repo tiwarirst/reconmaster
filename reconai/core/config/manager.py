@@ -74,7 +74,10 @@ class ConfigManager:
 
     def _find_default_config(self) -> Path | None:
         """Look for default config in standard locations."""
+        repo_root_config = Path(__file__).resolve().parents[3] / "config.yaml"
         candidates = [
+            Path("config.yaml"),
+            repo_root_config,
             Path("config/default.yaml"),
             Path("~/.config/reconai/config.yaml").expanduser(),
             Path("/etc/reconai/config.yaml"),
@@ -88,7 +91,7 @@ class ConfigManager:
     def _load_yaml(path: Path) -> dict[str, Any]:
         """Load a YAML file safely."""
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 data = yaml.safe_load(f)
             return data if isinstance(data, dict) else {}
         except Exception:
