@@ -115,10 +115,10 @@ class PortScanModule(ReconModule):
             profile = SCAN_PROFILES.get(profile_name, SCAN_PROFILES["quick"])
             nmap_args: list[str] = list(profile["nmap_args"])
 
-            semaphore = asyncio.Semaphore(2)
+            semaphore = asyncio.Semaphore(5)
             tasks = [
                 self._scan_host(adapter, semaphore, host, nmap_args)
-                for host in hosts[:10]
+                for host in hosts[:100]
             ]
             await asyncio.gather(*tasks, return_exceptions=True)
         else:
@@ -126,13 +126,13 @@ class PortScanModule(ReconModule):
                 "Nmap not installed in PATH. Install: 'sudo apt install nmap' (Windows: 'winget install Insecure.Nmap'). "
                 "Ran pure-Python async TCP connect port scanning fallback."
             )
-            await self._python_tcp_scan(hosts[:10])
+            await self._python_tcp_scan(hosts[:100])
 
         # Verify if any ports were discovered. If 0 found (e.g. host blocks ping), verify web ports 80/443
         discovered_ports = self.db.get_ports(self.scan_id)
         if not discovered_ports:
             self.logger.info("Verifying standard web ports via direct socket connect...", module=self.config.name)
-            await self._python_tcp_scan(hosts[:5], ports_to_check=[80, 443, 8080, 8443])
+            await self._python_tcp_scan(hosts[:50], ports_to_check=[80, 443, 8080, 8443])
 
         duration = time.monotonic() - start
         self.logger.module_complete(self.config.name, duration=duration)
@@ -209,6 +209,7 @@ class PortScanModule(ReconModule):
                 result = await self.runner.run(
                     command=cmd,
                     timeout=timeout,
+                    on_output=streaming_cb,
                 )
 
                 self.logger.debug(

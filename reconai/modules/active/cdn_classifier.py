@@ -14,6 +14,7 @@ or a direct Origin host. Updates IP records in the database with provider tags.
 """
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import socket
 import time
@@ -74,9 +75,10 @@ class CDNClassifierModule(ReconModule):
                 clean = self.target.split("://")[-1].split("/")[0].split(":")[0]
                 hosts = [clean]
 
-            for h in hosts[:10]:
+            loop = asyncio.get_running_loop()
+            async def _resolve_host(h: str) -> None:
                 try:
-                    resolved_ip = socket.gethostbyname(h)
+                    resolved_ip = await loop.run_in_executor(None, socket.gethostbyname, h)
                     rec = IPRecord(scan_id=self.scan_id, ip=resolved_ip, host=h)
                     self.db.insert_ip(rec)
                     ip_records.append({"ip": resolved_ip, "host": h})
@@ -89,6 +91,8 @@ class CDNClassifierModule(ReconModule):
                     )
                 except Exception:
                     pass
+
+            await asyncio.gather(*[_resolve_host(h) for h in hosts[:15]], return_exceptions=True)
 
         if not ip_records:
             return

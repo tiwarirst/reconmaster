@@ -48,20 +48,35 @@ class TechnologyModule(ReconModule):
         if not urls:
             return
 
+        # Deduplicate to distinct origin hosts to eliminate redundant WhatWeb processes
+        unique_targets: list[str] = []
+        seen_hosts: set[str] = set()
+        for u in urls:
+            parsed = urlparse(u)
+            host_key = f"{parsed.scheme}://{parsed.netloc}"
+            if host_key not in seen_hosts:
+                seen_hosts.add(host_key)
+                unique_targets.append(host_key)
+            elif len(unique_targets) < 15:
+                unique_targets.append(u)
+
+        if not unique_targets:
+            unique_targets = urls[:10]
+
         start = time.monotonic()
-        self.logger.module_start(self.config.name, target=f"{len(urls)} URLs")
+        self.logger.module_start(self.config.name, target=f"{len(unique_targets)} unique target host(s)")
 
         adapter = WhatWebAdapter(self.runner)
         if await adapter.is_available():
             semaphore = asyncio.Semaphore(5)
-            tasks = [self._fingerprint_url(adapter, semaphore, url) for url in urls[:15]]
+            tasks = [self._fingerprint_url(adapter, semaphore, url) for url in unique_targets]
             await asyncio.gather(*tasks, return_exceptions=True)
         else:
             self.logger.info(
                 "WhatWeb binary not found; using built-in HTTP header and DOM technology inspector...",
                 module=self.config.name,
             )
-            await self._fingerprint_pure_python(urls[:20])
+            await self._fingerprint_pure_python(unique_targets)
 
         duration = time.monotonic() - start
         self.logger.module_complete(self.config.name, duration=duration)

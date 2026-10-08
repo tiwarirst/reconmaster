@@ -11,6 +11,7 @@ the vulnerability exists but do NOT cause damage.
 """
 from __future__ import annotations
 
+import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Callable, cast
 
@@ -66,7 +67,13 @@ class PoCGenerator:
     def generate(self, finding: dict, cve_data: dict | None = None) -> PoC:
         """Generate a PoC for the given finding dict."""
         attack_class = (finding.get("attack_class") or finding.get("title") or "").lower()
-        target = finding.get("affected_asset", "https://target.example.com/")
+        raw_target = str(finding.get("affected_asset") or "https://target.example.com/")
+        if "subdomain takeover" in attack_class:
+            target = raw_target
+        elif not raw_target.startswith("http://") and not raw_target.startswith("https://"):
+            target = f"https://{raw_target}"
+        else:
+            target = raw_target
         title = finding.get("title", "Unknown Vulnerability")
 
         # Find best matching template
@@ -76,8 +83,11 @@ class PoCGenerator:
                 generator_method = method
                 break
 
-        gen_fn: Callable[..., PoC] = getattr(self, generator_method)
-        poc: PoC = gen_fn(title, target, finding, cve_data or {})
+        gen_fn: Callable[..., PoC] = getattr(self, generator_method, self._gen_generic)
+        try:
+            poc: PoC = gen_fn(title, target, finding, cve_data or {})
+        except Exception:
+            poc = self._gen_generic(title, target, finding, cve_data or {})
         return poc
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -603,6 +613,7 @@ except Exception as e:
         )
 
     def _gen_subdomain_takeover(self, title: str, target: str, finding: dict, cve: dict) -> PoC:
+        pure_host = _extract_host(target)
         return PoC(
             vulnerability=title,
             target=target,
@@ -610,7 +621,7 @@ except Exception as e:
 """Subdomain Takeover Verification PoC — ReconAI Generated"""
 import socket, requests
 
-TARGET_SUBDOMAIN = "{target}"
+TARGET_SUBDOMAIN = "{pure_host}"
 print(f"[*] Resolving {{TARGET_SUBDOMAIN}}")
 try:
     ip = socket.gethostbyname(TARGET_SUBDOMAIN)
@@ -647,10 +658,5 @@ print(f"Body (first 500 chars): {{r.text[:500]}}")
 
 
 def _extract_host(url: str) -> str:
-    from urllib.parse import urlparse
-    parsed = urlparse(url)
+    parsed = urllib.parse.urlparse(url)
     return parsed.netloc or url
-
-
-# Make urllib importable at module level
-import urllib.parse

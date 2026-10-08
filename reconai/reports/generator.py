@@ -17,10 +17,21 @@ from reconai.reports.scoring import RiskScoringEngine
 class ReportGenerator:
     """Generates scan reports in multiple formats."""
 
-    def __init__(self, db: DatabaseManager, scan_id: str, output_dir: Path) -> None:
+    def __init__(
+        self,
+        db: DatabaseManager,
+        scan_id: str,
+        output_dir: Path,
+        ai_summary: str = "",
+        ai_model: str = "",
+        attack_chain: str = "",
+    ) -> None:
         self.db = db
         self.scan_id = scan_id
         self.output_dir = output_dir
+        self.ai_summary = ai_summary
+        self.ai_model = ai_model
+        self.attack_chain = attack_chain
         self.reports_dir = output_dir / "reports"
         self.reports_dir.mkdir(parents=True, exist_ok=True)
 
@@ -44,6 +55,13 @@ class ReportGenerator:
 
         correlation = CorrelationEngine(self.db, self.scan_id)
         data["asset_graph"] = correlation.build_graph()
+
+        if self.ai_summary or self.attack_chain:
+            data["ai_analysis"] = {
+                "summary": self.ai_summary,
+                "model": self.ai_model or "Local LLM",
+                "attack_chain": self.attack_chain,
+            }
 
         out_file = self.reports_dir / "report.json"
         with open(out_file, "w", encoding="utf-8") as fp:
@@ -73,6 +91,26 @@ class ReportGenerator:
             f"- **Overall Risk Score:** {risk.get('score', 0)}/100",
             f"- **Security Grade:** {risk.get('grade', 'N/A')}",
             "",
+        ]
+
+        if self.ai_summary:
+            lines.extend([
+                "## 🤖 AI Threat Intelligence & Strategic Assessment",
+                f"**Model:** `{self.ai_model or 'Local LLM'}`",
+                "",
+                self.ai_summary,
+                "",
+            ])
+
+        if self.attack_chain and "Not enough findings" not in self.attack_chain:
+            lines.extend([
+                "## ⛓️ AI Correlated Attack Kill Chain",
+                "",
+                self.attack_chain,
+                "",
+            ])
+
+        lines.extend([
             "## Executive Summary",
             "",
             "| Metric | Count |",
@@ -86,7 +124,7 @@ class ReportGenerator:
             "",
             "## Correlated Asset Attack Surface",
             "",
-        ]
+        ])
 
         correlation = CorrelationEngine(self.db, self.scan_id)
         chains = correlation.get_correlated_chains()
@@ -99,6 +137,9 @@ class ReportGenerator:
                 lines.append(f"- **Resolved IPs:** `{ips_str}`")
                 lines.append(f"- **Open Ports:** {ports_str}")
                 lines.append(f"- **Technologies:** {tech_str}")
+                if ch.get("cloud_assets"):
+                    cloud_str = ", ".join(ch["cloud_assets"])
+                    lines.append(f"- **Cloud Assets:** {cloud_str}")
                 if ch["findings"]:
                     lines.append("- **Correlated Findings:**")
                     for f in ch["findings"]:
@@ -115,7 +156,11 @@ class ReportGenerator:
         if not findings:
             lines.append("No security findings discovered.")
 
+        from reconai.intelligence.poc_generator import PoCGenerator
+        poc_gen = PoCGenerator()
+
         for f in findings:
+            poc = poc_gen.generate(f)
             lines.extend([
                 f"### {f['title']}",
                 f"- **Severity:** {f['severity'].upper()}",
@@ -127,8 +172,21 @@ class ReportGenerator:
                 f"**Impact:** {f['impact']}",
                 "",
                 f"**Remediation:** {f['remediation']}",
-                "---",
             ])
+            if poc.curl_command:
+                lines.extend([
+                    "",
+                    "**Reproduction PoC:**",
+                    "```bash",
+                    poc.curl_command,
+                    "```",
+                ])
+            if poc.verification_steps:
+                lines.extend([
+                    "",
+                    "**Verification Steps:**",
+                ] + [f"- {s}" for s in poc.verification_steps])
+            lines.append("---")
 
         lines.extend([
             "",
@@ -320,7 +378,14 @@ class ReportGenerator:
 
     def generate_all(self) -> dict[str, Any]:
         """Generate all report formats."""
-        html_path = generate_html_report(self.db, self.scan_id, self.reports_dir)
+        html_path = generate_html_report(
+            self.db,
+            self.scan_id,
+            self.reports_dir,
+            ai_summary=self.ai_summary,
+            ai_model=self.ai_model,
+            attack_chain=self.attack_chain,
+        )
         return {
             "json": self.generate_json(),
             "markdown": self.generate_markdown(),

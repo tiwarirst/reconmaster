@@ -114,7 +114,7 @@ class Orchestrator:
     async def _on_scan_failed(self, event: Event) -> None:
         self.logger.error(f"Scan failed for target: {self.target} (ID: {self.scan_id})")
 
-    async def prepare_scan(self, mode: str, profile: str) -> None:
+    async def prepare_scan(self, mode: str, profile: str, timeout_override: int | None = None) -> None:
         """Initialize the scan record and plan module execution."""
         self.mode = mode
         self.profile = profile
@@ -136,16 +136,18 @@ class Orchestrator:
         for name in module_names:
             try:
                 mod_class = ModuleRegistry.get(name)
+                timeout_val = self._resolve_module_timeout(name, mode=mode, timeout_override=timeout_override)
                 mod_instance = mod_class(
                     db=self.db,
                     events=self.events,
                     logger=self.logger,
                     runner=self.runner,
                     out_dir=self.out_dir,
-                    timeout=self.config.config.timeouts.get("default"),
+                    timeout=timeout_val,
                 )
                 mod_instance.scan_id = self.scan_id
                 mod_instance.target = self.target
+                mod_instance.scope = self.scope
                 self.modules_to_run.append(mod_instance)
             except KeyError:
                 self.console.warning(f"Module '{name}' requested by mode '{mode}' not found in registry.")
@@ -161,6 +163,42 @@ class Orchestrator:
             output_dir=str(self.out_dir)
         )
         self.db.create_scan(scan_record)
+
+    def _resolve_module_timeout(self, name: str, mode: str, timeout_override: int | None) -> int:
+        """Tailor module execution timeouts according to workload intensity and scan mode."""
+        if timeout_override and timeout_override > 0:
+            return timeout_override
+
+        cfg_timeouts = getattr(self.config.config, "timeouts", {})
+        if isinstance(cfg_timeouts, dict):
+            val = cfg_timeouts.get(name) or cfg_timeouts.get(f"{name}_tool")
+            if val:
+                return val
+
+        # Deep mode gets 2x timeout multiplier so heavy active scanners do not get cut off
+        deep_mult = 2 if mode == "deep" else 1
+
+        if name in ("crawler", "katana_crawler", "web_crawler"):
+            return 180 * deep_mult
+        elif name in ("nuclei_vuln", "vuln_intelligence", "dalfox", "sqlmap"):
+            return 150 * deep_mult
+        elif name in ("subdomains_active", "subdomain_tool"):
+            return 120 * deep_mult
+        elif name in ("bucket_enum", "cloud_bucket_enum"):
+            return 120 * deep_mult
+        elif name in ("ports", "naabu_ports"):
+            return 120 * deep_mult
+        elif name in ("technologies", "whatweb"):
+            return 90 * deep_mult
+        elif name in ("screenshot", "browser_recon"):
+            return 120 * deep_mult
+        elif name in ("paramspider", "archive_urls"):
+            return 90 * deep_mult
+
+        default_timeout = 60
+        if isinstance(cfg_timeouts, dict):
+            default_timeout = cfg_timeouts.get("default", 60)
+        return default_timeout * deep_mult
 
     async def run(self) -> None:
         """Execute all planned modules sequentially.
@@ -204,14 +242,13 @@ class Orchestrator:
                     warnings.append(f"{module.config.name}: {reason}{hint_str}")
                     continue
                     
-                # Run module
+                # Run module with strict timeout protection
                 try:
                     mod_start = time.monotonic()
-
-                    # Build dynamic kwargs context from current scan database state
-                    # Modules receive subdomains discovered so far, live URLs, IPs, profile, and mode
                     module_kwargs = self._build_module_kwargs()
-                    await module.run(**module_kwargs)
+                    mod_timeout = getattr(module, "timeout", None) or 180
+
+                    await asyncio.wait_for(module.run(**module_kwargs), timeout=mod_timeout)
 
                     mod_duration = time.monotonic() - mod_start
                     self.console.success(
@@ -224,6 +261,12 @@ class Orchestrator:
                         for w in module.warnings:
                             if w not in warnings:
                                 warnings.append(f"{module.config.name}: {w}")
+                except asyncio.TimeoutError:
+                    mod_duration = time.monotonic() - mod_start
+                    self.console.warning(f"Module timed out after {mod_duration:.1f}s", module=module.config.name)
+                    self.logger.warning(f"Module {module.config.name} reached timeout threshold of {mod_timeout}s")
+                    modules_failed += 1
+                    warnings.append(f"{module.config.name}: Timed out after {mod_timeout}s")
                 except Exception as e:
                     self.console.error(f"Module failed: {e}", module=module.config.name)
                     self.logger.error(f"Module {module.config.name} exception: {e}")
@@ -263,9 +306,7 @@ class Orchestrator:
         display_stats["Duration"] = f"{duration:.1f}s"
         display_stats["Modules run"] = f"{modules_completed} / {len(self.modules_to_run)}"
 
-        report_path = ""
-        # TODO: Trigger report generation here if requested
-
+        report_path = str(self.out_dir / "reports")
         self.console.summary(display_stats, warnings, report_path)
 
     def _build_module_kwargs(self) -> dict[str, Any]:

@@ -83,15 +83,18 @@ class SubdomainModule(ReconModule):
                 brute_subs = await self._brute_dns_prefixes(domain)
                 subdomains.update(brute_subs)
 
-            for sub in subdomains:
-                record = SubdomainRecord(
+            records = [
+                SubdomainRecord(
                     scan_id=self.scan_id,
                     subdomain=sub,
                     domain=domain,
                     sources=["active_tools"],
                 )
-                self.db.insert_subdomain(record)
+                for sub in subdomains
+            ]
+            self.db.insert_subdomains_batch(records)
 
+            for sub in subdomains:
                 await self.events.emit_discovery(
                     event_type=EventType.SUBDOMAIN_DISCOVERED,
                     source=self.config.name,
@@ -109,36 +112,41 @@ class SubdomainModule(ReconModule):
 
     async def _run_subfinder(self, adapter: SubfinderAdapter, domain: str) -> set[str]:
         cmd = adapter.build_command(domain=domain)
-        result = await self.runner.run(command=cmd, timeout=120)
+        result = await self.runner.run(command=cmd, timeout=60)
         return set(adapter.parse(result))
 
     async def _run_amass(self, adapter: AmassAdapter, domain: str) -> set[str]:
         cmd = adapter.build_command(domain=domain, passive=True)
-        result = await self.runner.run(command=cmd, timeout=300)
+        result = await self.runner.run(command=cmd, timeout=60)
         return set(adapter.parse(result))
 
     async def _brute_dns_prefixes(self, domain: str) -> set[str]:
-        """Resolve top high-value subdomains using asynchronous DNS as resilient fallback."""
+        """Resolve top high-value subdomains using asynchronous DNS with public nameservers."""
         import dns.asyncresolver
         prefixes = [
             "www", "mail", "api", "dev", "app", "vpn", "admin", "portal",
             "staging", "test", "auth", "corp", "cdn", "support", "shop",
             "status", "git", "jenkins", "m", "mobile", "beta", "cloud",
-            "secure", "remote", "login", "mx", "ns1", "ns2", "cpanel", "webmail"
+            "secure", "remote", "login", "mx", "ns1", "ns2", "cpanel", "webmail",
+            "sso", "dashboard", "grafana", "gitlab", "backend", "db", "stage"
         ]
         found: set[str] = set()
         resolver = dns.asyncresolver.Resolver()
-        resolver.timeout = 1.5
-        resolver.lifetime = 3.0
+        resolver.nameservers = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
+        resolver.timeout = 1.0
+        resolver.lifetime = 2.0
+
+        semaphore = asyncio.Semaphore(20)
 
         async def _probe(prefix: str) -> None:
             candidate = f"{prefix}.{domain}"
-            try:
-                answers = await resolver.resolve(candidate, "A")
-                if answers:
-                    found.add(candidate)
-            except Exception:
-                pass
+            async with semaphore:
+                try:
+                    answers = await resolver.resolve(candidate, "A")
+                    if answers:
+                        found.add(candidate)
+                except Exception:
+                    pass
 
         tasks = [_probe(p) for p in prefixes]
         await asyncio.gather(*tasks, return_exceptions=True)

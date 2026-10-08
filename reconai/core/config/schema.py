@@ -119,6 +119,14 @@ class APIKeyConfig(BaseModel):
         return bool(val and val.strip())
 
 
+class AIConfig(BaseModel):
+    """Configuration for AI intelligence and remote/local LLM backend."""
+    enabled: bool = False
+    provider: str = "ollama"
+    model: str = "llama3"
+    url: str = "http://localhost:11434"
+
+
 class ReconAIConfig(BaseModel):
     """Root configuration model for the entire platform."""
     timeouts: TimeoutConfig = Field(default_factory=TimeoutConfig)
@@ -128,6 +136,7 @@ class ReconAIConfig(BaseModel):
     output: OutputConfig = Field(default_factory=OutputConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     api_keys: APIKeyConfig = Field(default_factory=APIKeyConfig)
+    ai: AIConfig = Field(default_factory=AIConfig)
     debug: bool = False
     verbose: bool = False
 

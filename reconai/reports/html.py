@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import html as html_lib
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -74,6 +75,9 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   .screenshot-caption {{ padding:0.75rem 1rem; font-size:0.8rem; color:var(--text); word-break:break-all; }}
   .url-link {{ color:var(--accent); text-decoration:none; word-break:break-all; }}
   .url-link:hover {{ text-decoration:underline; }}
+  .ai-card {{ background:linear-gradient(135deg,rgba(88,166,255,0.08) 0%,rgba(138,43,226,0.08) 100%); border:1px solid var(--accent); border-radius:8px; padding:1.5rem; margin-bottom:2rem; }}
+  .ai-title {{ color:var(--accent); font-weight:700; font-size:1.15rem; margin-bottom:0.75rem; }}
+  .ai-content {{ white-space:pre-wrap; line-height:1.6; font-size:0.9rem; color:var(--text); }}
 </style>
 </head>
 <body>
@@ -91,6 +95,8 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   <div>/100</div>
   <div class="grade">Grade: {risk_grade}</div>
 </div>
+
+{ai_section}
 
 <h2>Attack Surface Overview</h2>
 <div class="stats-grid">
@@ -139,7 +145,14 @@ def _sev_class(severity: str) -> str:
     return f"sev-{severity.lower()}"
 
 
-def generate_html_report(db: "DatabaseManager", scan_id: str, out_dir: Path) -> Path:
+def generate_html_report(
+    db: "DatabaseManager",
+    scan_id: str,
+    out_dir: Path,
+    ai_summary: str = "",
+    ai_model: str = "",
+    attack_chain: str = "",
+) -> Path:
     """Generate a full HTML report with visual screenshot gallery, crawled URLs, and API endpoints."""
     from reconai.reports.scoring import RiskScoringEngine
 
@@ -175,15 +188,32 @@ def generate_html_report(db: "DatabaseManager", scan_id: str, out_dir: Path) -> 
         _stat_card("Cloud Assets", stats.get("cloud_assets", 0)),
     ])
 
-    # 1. Findings table
+    # 1. Findings table with interactive PoC verification
     if findings:
-        rows = "".join(
-            f'<tr><td class="{_sev_class(f["severity"])}">{f["severity"].upper()}</td>'
-            f'<td><strong>{f["title"]}</strong></td><td><code>{f["affected_asset"]}</code></td>'
-            f'<td>{f["confidence"]}</td></tr>'
-            for f in findings
-        )
-        findings_table = f'<table><tr><th>Severity</th><th>Title</th><th>Affected Asset</th><th>Confidence</th></tr>{rows}</table>'
+        from reconai.intelligence.poc_generator import PoCGenerator
+        poc_gen = PoCGenerator()
+        rows = []
+        for f in findings:
+            poc = poc_gen.generate(f)
+            curl_html = ""
+            if poc.curl_command:
+                curl_html = (
+                    f'<details style="margin-top:0.4rem;cursor:pointer;">'
+                    f'<summary style="color:var(--accent);font-size:0.8rem;font-weight:600;">🔍 Run Verification PoC (Curl)</summary>'
+                    f'<pre style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:0.5rem;margin-top:0.3rem;overflow-x:auto;font-size:0.75rem;color:#7ee787;"><code>{html_lib.escape(poc.curl_command)}</code></pre>'
+                    f'</details>'
+                )
+            evidence_html = ""
+            if f.get("why_detected"):
+                evidence_html = f'<div style="color:var(--low);font-size:0.75rem;margin-top:0.25rem;"><em>Why: {html_lib.escape(str(f["why_detected"]))}</em></div>'
+
+            rows.append(
+                f'<tr><td class="{_sev_class(f["severity"])}">{f["severity"].upper()}</td>'
+                f'<td><strong>{html_lib.escape(f["title"])}</strong>{evidence_html}{curl_html}</td>'
+                f'<td><code>{html_lib.escape(f["affected_asset"])}</code></td>'
+                f'<td>{f["confidence"]}</td></tr>'
+            )
+        findings_table = f'<table><tr><th>Severity</th><th>Vulnerability & PoC</th><th>Affected Asset</th><th>Confidence</th></tr>{"".join(rows)}</table>'
     else:
         findings_table = "<p style='color:var(--low);'>No security vulnerabilities discovered.</p>"
 
@@ -348,18 +378,45 @@ def generate_html_report(db: "DatabaseManager", scan_id: str, out_dir: Path) -> 
                     for f in ch["findings"]
                 ) + '</div>'
 
+            cloud_html = ""
+            if ch.get("cloud_assets"):
+                cloud_html = '<div class="chain-meta"><strong>Cloud:</strong> ' + "".join(
+                    f'<span class="chain-tag" style="background:rgba(210,153,34,0.15);color:#d29922;">{c}</span>'
+                    for c in ch["cloud_assets"]
+                ) + '</div>'
+
             card_htmls.append(
                 f'<div class="{card_cls}">'
                 f'<div class="chain-host">🌐 {ch["host"]}</div>'
                 f'<div class="chain-meta"><strong>IPs:</strong> {ips_html}</div>'
                 f'<div class="chain-meta"><strong>Ports:</strong> {ports_html}</div>'
                 f'<div class="chain-meta"><strong>Technologies:</strong> {tech_html}</div>'
+                f'{cloud_html}'
                 f'{finds_html}'
                 f'</div>'
             )
         correlation_section = f'<div class="chain-grid">{"".join(card_htmls)}</div>'
     else:
         correlation_section = "<p style='color:var(--low);'>No correlated attack surface chains discovered.</p>"
+
+    ai_parts = []
+    if ai_summary:
+        ai_parts.append(
+            f'<h2>🤖 AI Threat Intelligence & Strategic Assessment</h2>'
+            f'<div class="ai-card">'
+            f'<div class="ai-title">Model: <code>{html_lib.escape(ai_model or "Local LLM")}</code></div>'
+            f'<div class="ai-content">{html_lib.escape(ai_summary)}</div>'
+            f'</div>'
+        )
+    if attack_chain and "Not enough findings" not in attack_chain:
+        ai_parts.append(
+            f'<h2>⛓️ AI Correlated Attack Kill Chain</h2>'
+            f'<div class="ai-card" style="border-color:#d29922;background:linear-gradient(135deg,rgba(210,153,34,0.08) 0%,rgba(248,81,73,0.08) 100%);">'
+            f'<div class="ai-title" style="color:#d29922;">Multi-Stage Attack Chain Synthesis</div>'
+            f'<div class="ai-content">{html_lib.escape(attack_chain)}</div>'
+            f'</div>'
+        )
+    ai_section = "".join(ai_parts)
 
     html = _HTML_TEMPLATE.format(
         target=scan["target"],
@@ -368,6 +425,7 @@ def generate_html_report(db: "DatabaseManager", scan_id: str, out_dir: Path) -> 
         duration=f"{scan.get('duration', 0):.1f}",
         risk_score=risk.get("score", 0),
         risk_grade=risk.get("grade", "N/A"),
+        ai_section=ai_section,
         stats_cards=stats_cards,
         correlation_section=correlation_section,
         findings_count=len(findings),

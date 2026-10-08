@@ -69,11 +69,41 @@ class ReconModule(ABC):
         self.out_dir: Path = out_dir or Path("output")
         self.timeout: int = timeout
         self.warnings: list[str] = []
+        self.scope: Any = None
+
+    def is_in_scope(self, candidate: str) -> bool:
+        """Centralized validation against authorized scanning scope boundaries."""
+        if not self.scope:
+            return True
+        if hasattr(self.scope, "strict") and not self.scope.strict:
+            return True
+        if hasattr(self.scope, "is_in_scope"):
+            return bool(self.scope.is_in_scope(candidate))
+        return True
 
     def record_warning(self, message: str) -> None:
         """Record an actionable warning or installation guidance for missing tools / errors."""
         self.warnings.append(message)
         self.logger.warning(message, module=self.config.name)
+
+    async def emit_finding(self, record: Any) -> None:
+        """Centralized helper to persist and emit a finding with automatic source attribution."""
+        from reconai.core.events.types import EventType
+        if hasattr(record, "source") and not record.source:
+            record.source = self.config.name
+        self.db.insert_finding(record)
+        sev_val = getattr(getattr(record, "severity", None), "value", str(getattr(record, "severity", "")))
+        await self.events.emit_discovery(
+            event_type=EventType.FINDING_DISCOVERED,
+            source=self.config.name,
+            data={
+                "title": getattr(record, "title", ""),
+                "severity": sev_val,
+                "asset": getattr(record, "affected_asset", ""),
+            },
+            scan_id=self.scan_id,
+            target=self.target,
+        )
 
     async def check_requirements(self) -> tuple[bool, str]:
         """Check if external tools required by this module are available.

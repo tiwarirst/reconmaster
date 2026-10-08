@@ -27,7 +27,7 @@ class OllamaAdapter(AIAdapter):
     async def is_available(self) -> bool:
         """Check if Ollama server is running and discover installed models."""
         try:
-            async with httpx.AsyncClient(timeout=4.0) as client:
+            async with httpx.AsyncClient(timeout=6.0) as client:
                 resp = await client.get(f"{self.base_url}/api/tags")
                 if resp.status_code == 200:
                     data = resp.json()

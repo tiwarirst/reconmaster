@@ -104,18 +104,8 @@ class SecurityHeadersModule(ReconModule):
                         impact=info["impact"],
                         remediation=f"Configure the web server to include the {header} header.",
                         detection_method="HTTP response header analysis",
-                    )
-                    self.db.insert_finding(finding)
-                    await self.events.emit_discovery(
-                        event_type=EventType.FINDING_DISCOVERED,
                         source=self.config.name,
-                        data={
-                            "title": finding.title,
-                            "severity": finding.severity.value,
-                            "asset": finding.affected_asset,
-                        },
-                        scan_id=self.scan_id,
-                        target=self.target,
                     )
+                    await self.emit_finding(finding)
         except Exception as e:
             self.logger.debug(f"Header check failed for {url}: {e}")

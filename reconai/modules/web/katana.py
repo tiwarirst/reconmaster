@@ -54,22 +54,36 @@ class KatanaModule(ReconModule):
         if not urls:
             return
 
+        from urllib.parse import urlparse
+        seed_urls: list[str] = []
+        seen_roots: set[str] = set()
+        for u in urls:
+            parsed = urlparse(u)
+            root = f"{parsed.scheme}://{parsed.netloc}/"
+            if root not in seen_roots:
+                seen_roots.add(root)
+                seed_urls.append(root)
+            if len(seed_urls) >= 8:
+                break
+
+        crawl_targets = seed_urls if seed_urls else urls[:8]
+
         adapter = KatanaAdapter(self.runner)
         has_katana = await adapter.is_available()
 
-        self.logger.module_start(self.config.name, target=f"{len(urls)} URLs")
+        self.logger.module_start(self.config.name, target=f"{len(crawl_targets)} seed URL(s)")
         start = time.monotonic()
 
         if has_katana:
             semaphore = asyncio.Semaphore(3)
-            tasks = [self._crawl_url(adapter, semaphore, url) for url in urls]
+            tasks = [self._crawl_url(adapter, semaphore, url) for url in crawl_targets]
             await asyncio.gather(*tasks, return_exceptions=True)
         else:
             self.record_warning(
                 "Katana not installed in PATH. Install: 'go install github.com/projectdiscovery/katana/cmd/katana@latest'. "
                 "Ran robots/sitemap crawler fallback."
             )
-            await self._crawl_sitemaps(urls[:5])
+            await self._crawl_sitemaps(crawl_targets[:5])
 
         self.logger.module_complete(self.config.name, duration=time.monotonic() - start)
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -200,6 +201,7 @@ CREATE TABLE IF NOT EXISTS findings (
     conditions_required TEXT DEFAULT '',
     safe_verification TEXT DEFAULT '',
     prevention TEXT DEFAULT '',
+    source TEXT DEFAULT '',
     UNIQUE(scan_id, title, affected_asset)
 );
 
@@ -257,12 +259,16 @@ class DatabaseManager:
     def __init__(self, db_path: Path | str = ":memory:") -> None:
         self._db_path = str(db_path)
         self._conn: sqlite3.Connection | None = None
+        self._lock = threading.Lock()
 
     def connect(self) -> None:
-        """Open database connection and create schema."""
-        self._conn = sqlite3.connect(self._db_path)
+        """Open database connection and create schema with high-performance PRAGMAs."""
+        self._conn = sqlite3.connect(self._db_path, check_same_thread=False, timeout=30.0)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA cache_size=-64000")
+        self._conn.execute("PRAGMA temp_store=MEMORY")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
         self._conn.commit()
@@ -317,6 +323,8 @@ class DatabaseManager:
             "SELECT * FROM scans ORDER BY started_at DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+    get_recent_scans = list_scans
 
     # ── Insert Operations ────────────────────────────────────
     # All inserts are:
@@ -420,6 +428,142 @@ class DatabaseManager:
         except Exception:
             return 0
 
+    def insert_urls_batch(self, records: list[URLRecord]) -> int:
+        """Batch insert multiple URL records in a single high-performance transaction."""
+        if not records:
+            return 0
+        try:
+            params = [
+                (r.scan_id, r.url, r.method, r.status_code, r.content_type,
+                 r.content_length, r.title, r.redirect_url, r.source, r.depth)
+                for r in records
+            ]
+            cur = self.conn.executemany(
+                "INSERT OR IGNORE INTO urls "
+                "(scan_id, url, method, status_code, content_type, content_length, "
+                "title, redirect_url, source, depth) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params,
+            )
+            self.conn.commit()
+            return cur.rowcount
+        except Exception:
+            return 0
+
+    def insert_subdomains_batch(self, records: list[SubdomainRecord]) -> int:
+        """Batch insert multiple subdomains in a single high-performance transaction."""
+        if not records:
+            return 0
+        try:
+            params = [
+                (r.scan_id, r.subdomain, r.domain, json.dumps(r.sources),
+                 json.dumps(r.resolved_ips), r.http_status, r.https_status,
+                 r.title, r.first_seen.isoformat(), r.last_seen.isoformat(),
+                 int(r.is_alive), r.priority)
+                for r in records
+            ]
+            cur = self.conn.executemany(
+                "INSERT OR IGNORE INTO subdomains "
+                "(scan_id, subdomain, domain, sources, resolved_ips, http_status, https_status, "
+                "title, first_seen, last_seen, is_alive, priority) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params,
+            )
+            self.conn.commit()
+            return cur.rowcount
+        except Exception:
+            return 0
+
+    def insert_api_endpoints_batch(self, records: list[APIEndpoint]) -> int:
+        """Batch insert multiple API endpoints in a single high-performance transaction."""
+        if not records:
+            return 0
+        try:
+            params = [
+                (r.scan_id, r.host, r.method, r.path, r.full_url,
+                 r.content_type, r.auth_required, r.source, r.api_type)
+                for r in records
+            ]
+            cur = self.conn.executemany(
+                "INSERT OR IGNORE INTO api_endpoints "
+                "(scan_id, host, method, path, full_url, content_type, auth_required, source, api_type) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params,
+            )
+            self.conn.commit()
+            return cur.rowcount
+        except Exception:
+            return 0
+
+    def insert_ports_batch(self, records: list[PortRecord]) -> int:
+        """Batch insert or enrich multiple port records in a single high-performance transaction."""
+        if not records:
+            return 0
+        try:
+            params = [
+                (r.scan_id, r.host, r.port, r.protocol, r.state,
+                 r.service, r.product, r.version, r.banner, r.cpe, r.source)
+                for r in records
+            ]
+            cur = self.conn.executemany(
+                """INSERT INTO ports (scan_id, host, port, protocol, state, service, product, version, banner, cpe, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scan_id, host, port, protocol) DO UPDATE SET
+                    state   = excluded.state,
+                    service = CASE WHEN excluded.service != '' THEN excluded.service ELSE service END,
+                    product = CASE WHEN excluded.product != '' THEN excluded.product ELSE product END,
+                    version = CASE WHEN excluded.version != '' THEN excluded.version ELSE version END,
+                    banner  = CASE WHEN excluded.banner  != '' THEN excluded.banner  ELSE banner  END,
+                    source  = excluded.source
+                """,
+                params,
+            )
+            self.conn.commit()
+            return cur.rowcount
+        except Exception:
+            return 0
+
+    def insert_technologies_batch(self, records: list[TechnologyRecord]) -> int:
+        """Batch insert multiple technologies in a single transaction."""
+        if not records:
+            return 0
+        try:
+            params = [
+                (r.scan_id, r.host, r.name, r.category, r.version,
+                 r.confidence, r.source, json.dumps(r.evidence))
+                for r in records
+            ]
+            cur = self.conn.executemany(
+                "INSERT OR IGNORE INTO technologies "
+                "(scan_id, host, name, category, version, confidence, source, evidence) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                params,
+            )
+            self.conn.commit()
+            return cur.rowcount
+        except Exception:
+            return 0
+
+    def insert_dns_records_batch(self, records: list[DNSRecord]) -> int:
+        """Batch insert multiple DNS records in a single transaction."""
+        if not records:
+            return 0
+        try:
+            params = [
+                (r.scan_id, r.hostname, r.record_type, r.value, r.ttl, r.source, r.timestamp.isoformat())
+                for r in records
+            ]
+            cur = self.conn.executemany(
+                "INSERT OR IGNORE INTO dns_records "
+                "(scan_id, hostname, record_type, value, ttl, source, timestamp) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params,
+            )
+            self.conn.commit()
+            return cur.rowcount
+        except Exception:
+            return 0
+
     def insert_technology(self, record: TechnologyRecord) -> int:
         try:
             cur = self.conn.execute(
@@ -464,26 +608,43 @@ class DatabaseManager:
             return 0
 
     def insert_finding(self, record: FindingRecord) -> int:
-        """Insert a finding, silently ignoring exact duplicates (same title + asset)."""
+        """Insert or upgrade a finding with rich evidence & active verification status."""
         try:
-            cur = self.conn.execute(
-                "INSERT OR IGNORE INTO findings "
-                "(scan_id, title, severity, confidence, status, affected_asset, affected_asset_type, "
-                "description, impact, evidence, detection_method, remediation, refs, cve, cwe, "
-                "cvss, verified, timestamp, what_is_it, why_detected, attack_class, "
-                "conditions_required, safe_verification, prevention) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (record.scan_id, record.title, record.severity.value, record.confidence.value,
-                 record.status.value, record.affected_asset, record.affected_asset_type,
-                 record.description, record.impact, record.evidence, record.detection_method,
-                 record.remediation, json.dumps(record.references), json.dumps(record.cve),
-                 json.dumps(record.cwe), record.cvss, int(record.verified),
-                 record.timestamp.isoformat(), record.what_is_it, record.why_detected,
-                 record.attack_class, record.conditions_required, record.safe_verification,
-                 record.prevention),
-            )
-            self.conn.commit()
-            return cur.lastrowid or 0
+            with self._lock:
+                cur = self.conn.execute(
+                    """
+                    INSERT INTO findings 
+                    (scan_id, title, severity, confidence, status, affected_asset, affected_asset_type, 
+                    description, impact, evidence, detection_method, remediation, refs, cve, cwe, 
+                    cvss, verified, timestamp, what_is_it, why_detected, attack_class, 
+                    conditions_required, safe_verification, prevention, source) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(scan_id, title, affected_asset) DO UPDATE SET
+                        severity = CASE 
+                            WHEN excluded.severity = 'critical' THEN 'critical'
+                            WHEN excluded.severity = 'high' AND findings.severity != 'critical' THEN 'high'
+                            WHEN excluded.severity = 'medium' AND findings.severity NOT IN ('critical', 'high') THEN 'medium'
+                            WHEN excluded.severity = 'low' AND findings.severity = 'info' THEN 'low'
+                            ELSE findings.severity END,
+                        confidence = CASE WHEN excluded.confidence != 'info' THEN excluded.confidence ELSE findings.confidence END,
+                        status = CASE WHEN excluded.status != 'info' THEN excluded.status ELSE findings.status END,
+                        evidence = CASE WHEN excluded.evidence != '' THEN excluded.evidence ELSE findings.evidence END,
+                        cvss = CASE WHEN excluded.cvss IS NOT NULL THEN excluded.cvss ELSE findings.cvss END,
+                        verified = CASE WHEN excluded.verified = 1 THEN 1 ELSE findings.verified END,
+                        remediation = CASE WHEN excluded.remediation != '' THEN excluded.remediation ELSE findings.remediation END,
+                        source = CASE WHEN excluded.source != '' THEN excluded.source ELSE findings.source END
+                    """,
+                    (record.scan_id, record.title, record.severity.value, record.confidence.value,
+                     record.status.value, record.affected_asset, record.affected_asset_type,
+                     record.description, record.impact, record.evidence, record.detection_method,
+                     record.remediation, json.dumps(record.references), json.dumps(record.cve),
+                     json.dumps(record.cwe), record.cvss, int(record.verified),
+                     record.timestamp.isoformat(), record.what_is_it, record.why_detected,
+                     record.attack_class, record.conditions_required, record.safe_verification,
+                     record.prevention, record.source or "scanner"),
+                )
+                self.conn.commit()
+                return cur.lastrowid or 0
         except Exception:
             return 0
 
@@ -616,12 +777,15 @@ class DatabaseManager:
             "urls", "technologies", "certificates", "api_endpoints", "findings",
             "cloud_assets",
         ]
-        stats: dict[str, int] = {}
+        stats: dict[str, Any] = {}
         for table in tables:
             row = self.conn.execute(
                 f"SELECT COUNT(*) AS c FROM {table} WHERE scan_id = ?", (scan_id,)
             ).fetchone()
             stats[table] = int(row["c"]) if row else 0
+        scan_row = self.conn.execute("SELECT target FROM scans WHERE id = ?", (scan_id,)).fetchone()
+        if scan_row and scan_row["target"]:
+            stats["target"] = str(scan_row["target"])
         return stats
 
     def get_cloud_assets(

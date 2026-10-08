@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import asyncio
 import io
+from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 
 class StreamHandler:
@@ -16,7 +17,8 @@ class StreamHandler:
 
     Features:
     - Streams lines to terminal callbacks as they arrive
-    - Captures full output for later processing
+    - Captures full output for later processing (bounded in memory to prevent OOM)
+    - Gracefully handles long lines (>64KB) without breaking stream
     - Optionally writes to file in real-time
     - Prefixes each line with module name and timestamp
     """
@@ -28,14 +30,15 @@ class StreamHandler:
         on_stdout: Callable[[str], None] | None = None,
         on_stderr: Callable[[str], None] | None = None,
         prefix: bool = True,
+        max_buffer_lines: int = 10000,
     ) -> None:
         self._module_name = module_name
         self._output_file = output_file
         self._on_stdout = on_stdout
         self._on_stderr = on_stderr
         self._prefix = prefix
-        self._stdout_lines: list[str] = []
-        self._stderr_lines: list[str] = []
+        self._stdout_lines: deque[str] = deque(maxlen=max_buffer_lines)
+        self._stderr_lines: deque[str] = deque(maxlen=max_buffer_lines)
         self._file_handle: io.TextIOWrapper | None = None
 
     async def __aenter__(self) -> "StreamHandler":
@@ -60,14 +63,19 @@ class StreamHandler:
     async def _stream(
         self,
         stream: asyncio.StreamReader,
-        buffer: list[str],
+        buffer: deque[str],
         callback: Callable[[str], None] | None,
         stream_type: str,
     ) -> str:
-        """Internal stream reader."""
+        """Internal stream reader with buffer bounds and LimitOverrunError recovery."""
         while True:
             try:
-                line_bytes = await stream.readline()
+                try:
+                    line_bytes = await stream.readline()
+                except (asyncio.LimitOverrunError, ValueError):
+                    # Line exceeded default 64KB chunk — read a safe block
+                    line_bytes = await stream.read(8192)
+
                 if not line_bytes:
                     break
 

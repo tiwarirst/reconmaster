@@ -215,8 +215,9 @@ class APIMinerModule(ReconModule):
             what_is_it="A machine-readable API definition describing operations, parameters, and data models of an application.",
             attack_class="Information Disclosure / API Surface Exposure",
             prevention="Disable Swagger UI and OpenAPI JSON endpoints in production builds.",
+            source=self.config.name,
         )
-        self.db.insert_finding(finding)
+        await self.emit_finding(finding)
 
     async def _check_graphql(self, client: httpx.AsyncClient, base_url: str) -> None:
         """Probe for GraphQL endpoint and check if introspection is active."""
@@ -285,8 +286,9 @@ class APIMinerModule(ReconModule):
                             what_is_it="A GraphQL feature that enables clients to query the schema for details about what queries and mutations are supported.",
                             attack_class="API Information Disclosure",
                             prevention="Disable introspection queries in Apollo Server, Yoga, or whichever GraphQL engine is in use.",
+                            source=self.config.name,
                         )
-                        self.db.insert_finding(finding)
+                        await self.emit_finding(finding)
                         return
             except Exception:
                 continue

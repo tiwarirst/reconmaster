@@ -148,16 +148,6 @@ class JavaScriptAnalysisModule(ReconModule):
                 description="A string resembling an API key, client secret, or token was found hardcoded in client-side code.",
                 impact="Hardcoded secrets can be extracted by any user, leading to unauthorized access.",
                 remediation="Remove the secret from client-side code and implement proper backend authentication.",
-            )
-            self.db.insert_finding(finding)
-            await self.events.emit_discovery(
-                event_type=EventType.FINDING_DISCOVERED,
                 source=self.config.name,
-                data={
-                    "title": finding.title,
-                    "severity": finding.severity.value,
-                    "asset": finding.affected_asset,
-                },
-                scan_id=self.scan_id,
-                target=self.target,
             )
+            await self.emit_finding(finding)

@@ -49,6 +49,8 @@ class Analyzer:
         """Generate a business-level executive summary of all findings."""
         findings = self.db.get_findings(self.scan_id)
         stats = self.db.get_scan_stats(self.scan_id)
+        scan = self.db.get_scan(self.scan_id) or {}
+        target_name = scan.get("target") or stats.get("target", "Target Domain")
         subdomains = self.db.get_subdomains(self.scan_id)
         ports = self.db.get_ports(self.scan_id)
         technologies = self.db.get_technologies(self.scan_id)
@@ -63,7 +65,7 @@ class Analyzer:
 
             prompt = (
                 "You are a Principal Cyber Security Architect reviewing an attack surface reconnaissance report for a client.\n"
-                f"Target: {stats.get('target', 'Target Domain')}\n"
+                f"Target: {target_name}\n"
                 f"Metrics: {stats.get('subdomains', 0)} subdomains, {stats.get('ports', 0)} open ports, "
                 f"{stats.get('urls', 0)} URLs discovered, {stats.get('technologies', 0)} technologies detected, "
                 f"{stats.get('cloud_assets', 0)} cloud assets.\n\n"
@@ -80,7 +82,7 @@ class Analyzer:
             if summary:
                 return summary
             return (
-                f"Attack surface mapping completed for {stats.get('target', 'target')}. "
+                f"Attack surface mapping completed for {target_name}. "
                 f"Discovered {stats.get('subdomains', 0)} subdomains, {stats.get('ports', 0)} open ports, "
                 f"and {stats.get('technologies', 0)} technologies. Zero direct vulnerability findings were flagged."
             )
@@ -104,8 +106,9 @@ class Analyzer:
         cloud_count = stats.get("cloud_assets", 0)
 
         prompt = (
-            "You are a Principal Security Engineer writing an executive summary for a "
-            "Fortune 500 client's CISO. A penetration test discovered the following:\n\n"
+            f"You are a Principal Security Engineer writing an executive summary for target '{target_name}'. "
+            "A comprehensive offensive security reconnaissance discovered the following:\n\n"
+            f"Target: {target_name}\n"
             f"Total Findings: {len(findings)} "
             f"(Critical: {len(critical)}, High: {len(high)})\n"
             f"CVEs Identified: {len(cves)} | "
@@ -156,16 +159,16 @@ class Analyzer:
 
         cve_ids = list(set(c.upper() for c in cve_ids))
 
-        # Fetch CVE + exploit data
+        # Fetch CVE + exploit data non-blockingly
         cve_records = []
         exploit_records = []
         for cve_id in cve_ids[:5]:
-            cve_rec = self.cve_lookup.lookup(cve_id)
+            cve_rec = await asyncio.to_thread(self.cve_lookup.lookup, cve_id)
             if cve_rec:
                 cve_records.append(cve_rec)
                 result["cve_data"].append(cve_rec.to_dict())
 
-            exp_intel = self.exploit_lookup.search(cve_id)
+            exp_intel = await asyncio.to_thread(self.exploit_lookup.search, cve_id)
             exploit_records.append(exp_intel)
             result["exploit_intel"].append({
                 "cve_id": cve_id,
@@ -238,7 +241,20 @@ class Analyzer:
             "**MITRE ATT&CK Techniques**: List relevant T-IDs\\n\\n"
             "Be technically precise and realistic. Name specific commands where applicable."
         )
-        return await self.ai.analyze(prompt)
+        narrative = await self.ai.analyze(prompt)
+        if not narrative:
+            steps_summary = "\n".join(
+                f"- Phase {idx+1}: Pivot through [{f['severity'].upper()}] {f['title']} on {f['affected_asset']}"
+                for idx, f in enumerate(sorted_findings[:5])
+            )
+            narrative = (
+                f"## Correlated Multi-Vector Attack Surface ({len(findings)} Findings)\n\n"
+                f"Target: `{stats.get('target', 'unknown')}`\n\n"
+                "Local LLM was offline during automated narrative synthesis. Correlated potential exploitation sequence:\n\n"
+                f"{steps_summary}\n\n"
+                "**Recommended Action**: Run `reconai exploit <scan_id> <title>` to generate automated PoCs for each vector."
+            )
+        return narrative
 
     # ─────────────────────────────────────────────────────────────────────
     # 4. Explain a Finding (for stakeholders)
@@ -276,41 +292,46 @@ class Analyzer:
 
         if cve_ids:
             for cve_id in cve_ids[:2]:
-                cve_rec = self.cve_lookup.lookup(str(cve_id))
-                exp_intel = self.exploit_lookup.search(str(cve_id))
+                cve_rec = await asyncio.to_thread(self.cve_lookup.lookup, str(cve_id))
+                exp_intel = await asyncio.to_thread(self.exploit_lookup.search, str(cve_id))
 
                 if cve_rec:
                     cve_context_str += (
-                        f"\\n{cve_id}: CVSS {cve_rec.cvss_v3_score} [{cve_rec.cvss_severity}] "
+                        f"\n{cve_id}: CVSS {cve_rec.cvss_v3_score} [{cve_rec.cvss_severity}] "
                         f"| AV:{cve_rec.attack_vector} PR:{cve_rec.privileges_required} "
                         f"UI:{cve_rec.user_interaction}"
                     )
 
                 if exp_intel.is_in_cisa_kev:
-                    kev_warning = f"\\n!!! CISA KEV: ACTIVELY EXPLOITED IN THE WILD (Added: {exp_intel.kev_date_added}) !!!"
+                    kev_warning = f"\n!!! CISA KEV: ACTIVELY EXPLOITED IN THE WILD (Added: {exp_intel.kev_date_added}) !!!"
 
                 if exp_intel.exploits:
-                    public_exploits_str = "\\nPublic Exploits Found:\\n" + "\\n".join(
+                    public_exploits_str = "\nPublic Exploits Found:\n" + "\n".join(
                         f"  [{e.source}] {e.title} — {e.url}"
                         for e in exp_intel.exploits[:5]
                     )
 
         # AI generates additional payload variants and analysis
         ai_prompt = (
-            f"You are an expert red teamer. Provide an offensive exploitation analysis for:\\n"
-            f"Vulnerability: {finding['title']}\\n"
-            f"Target Asset: {finding['affected_asset']}\\n"
-            f"Description: {finding.get('description', '')}\\n"
-            f"{cve_context_str}\\n{kev_warning}\\n\\n"
-            "Provide:\\n"
-            "1. Advanced exploitation technique beyond the basic PoC\\n"
-            "2. Three alternative payload variants for different WAF bypasses\\n"
-            "3. Post-exploitation steps — what to do AFTER initial access\\n"
-            "4. Out-of-band (OOB) detection technique using Burp Collaborator\\n"
-            "5. CVSS scoring justification for this specific instance\\n"
+            f"You are an expert red teamer. Provide an offensive exploitation analysis for:\n"
+            f"Vulnerability: {finding['title']}\n"
+            f"Target Asset: {finding['affected_asset']}\n"
+            f"Description: {finding.get('description', '')}\n"
+            f"{cve_context_str}\n{kev_warning}\n\n"
+            "Provide:\n"
+            "1. Advanced exploitation technique beyond the basic PoC\n"
+            "2. Three alternative payload variants for different WAF bypasses\n"
+            "3. Post-exploitation steps — what to do AFTER initial access\n"
+            "4. Out-of-band (OOB) detection technique using Burp Collaborator\n"
+            "5. CVSS scoring justification for this specific instance\n"
             "Be precise. Output all code in markdown blocks."
         )
         ai_analysis = await self.ai.analyze(ai_prompt)
+        if not ai_analysis:
+            ai_analysis = (
+                "Deterministic reproduction PoC package generated by ReconAI Offensive Intelligence Engine.\n"
+                "(Local LLM analysis was offline or did not respond)."
+            )
 
         # Compose the full package as a formatted string report
         separator = "=" * 70

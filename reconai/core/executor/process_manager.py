@@ -74,23 +74,26 @@ class ProcessManager:
                         pass
 
             else:
-                # ── Windows: no process groups, use direct signals ────────────
+                # ── Windows: kill entire process tree to prevent orphan zombies ──
                 try:
-                    process.terminate()
+                    kill_proc = await asyncio.create_subprocess_exec(
+                        "taskkill", "/F", "/T", "/PID", str(pid),
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    await asyncio.wait_for(kill_proc.wait(), timeout=3.0)
+                except Exception:
+                    pass
+
+                try:
+                    process.kill()
                 except (ProcessLookupError, OSError):
                     pass
 
                 try:
-                    await asyncio.wait_for(process.wait(), timeout=5.0)
-                except asyncio.TimeoutError:
-                    try:
-                        process.kill()
-                    except (ProcessLookupError, OSError):
-                        pass
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=3.0)
-                    except asyncio.TimeoutError:
-                        pass
+                    await asyncio.wait_for(process.wait(), timeout=2.0)
+                except Exception:
+                    pass
 
         except Exception:
             pass

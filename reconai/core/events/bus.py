@@ -65,11 +65,12 @@ class EventBus:
         if handler in handlers:
             handlers.remove(handler)
 
-    async def emit(self, event: Event) -> None:
+    async def emit(self, event: Event, wait: bool = True) -> None:
         """Emit an event to all subscribed handlers.
 
         Handlers are called concurrently. A failing handler
         does not prevent other handlers from receiving the event.
+        When wait=False, handlers run as decoupled background tasks.
         """
         async with self._lock:
             self._history.append(event)  # O(1), auto-evicts oldest if full
@@ -81,9 +82,13 @@ class EventBus:
         if not handlers:
             return
 
-        await asyncio.gather(
-            *(self._safe_call(h, event) for h in handlers)
-        )
+        if wait:
+            await asyncio.gather(
+                *(self._safe_call(h, event) for h in handlers)
+            )
+        else:
+            for h in handlers:
+                asyncio.create_task(self._safe_call(h, event))
 
     async def emit_discovery(
         self,
@@ -92,8 +97,9 @@ class EventBus:
         data: dict[str, Any],
         scan_id: str = "",
         target: str = "",
+        wait: bool = False,
     ) -> None:
-        """Convenience method for emitting discovery events."""
+        """Convenience method for emitting discovery events non-blockingly."""
         event = Event(
             type=event_type,
             source=source,
@@ -101,7 +107,7 @@ class EventBus:
             scan_id=scan_id,
             target=target,
         )
-        await self.emit(event)
+        await self.emit(event, wait=wait)
 
     @staticmethod
     async def _safe_call(handler: EventHandler, event: Event) -> None:

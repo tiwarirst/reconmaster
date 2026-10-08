@@ -24,33 +24,41 @@ class ScopeManager:
             # proceed with scanning
     """
 
-    def __init__(self, scope: ScopeDefinition):
+    def __init__(self, scope: ScopeDefinition, strict: bool = True):
         self._scope = scope
+        self.strict = strict
         self._validator = ScopeValidator(scope)
         self._checked: dict[str, bool] = {}
 
     @classmethod
-    def for_target(cls, target: str) -> ScopeManager:
+    def for_target(cls, target: str, strict: bool = True) -> ScopeManager:
         """Create a scope manager for a single target."""
         scope = ScopeDefinition.for_target(target)
-        return cls(scope)
+        return cls(scope, strict=strict)
 
     @classmethod
-    def from_yaml(cls, path: Path) -> ScopeManager:
-        """Load scope from a YAML file."""
+    def from_yaml(cls, path: Path, strict: bool = True) -> ScopeManager:
+        """Load scope from a YAML file (defaults to strict mode when an explicit scope file is provided)."""
         with open(path) as f:
             data = yaml.safe_load(f)
         scope = ScopeDefinition.from_yaml(data)
-        return cls(scope)
+        return cls(scope, strict=strict)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ScopeManager:
+    def from_dict(cls, data: dict[str, Any], strict: bool = True) -> ScopeManager:
         """Create scope from a dictionary."""
         scope = ScopeDefinition.from_yaml(data)
-        return cls(scope)
+        return cls(scope, strict=strict)
 
     def is_allowed(self, target: str) -> bool:
-        """Check if a target is within scope (cached)."""
+        """Check if a target is within scope (cached).
+
+        When strict=False, permits wide reconnaissance exploration so AI synthesis,
+        correlation, cloud asset discovery, and PoC generation have comprehensive data.
+        """
+        if not self.strict:
+            return True
+
         if target in self._checked:
             return self._checked[target]
 
@@ -63,19 +71,29 @@ class ScopeManager:
         return self.is_allowed(target)
 
     def is_domain_allowed(self, domain: str) -> bool:
+        if not self.strict:
+            return True
         return self._validator.is_domain_allowed(domain)
 
     def is_ip_allowed(self, ip: str) -> bool:
+        if not self.strict:
+            return True
         return self._validator.is_ip_allowed(ip)
 
     def is_port_allowed(self, port: int) -> bool:
+        if not self.strict:
+            return True
         return self._validator.is_port_allowed(port)
 
     def is_url_allowed(self, url: str) -> bool:
+        if not self.strict:
+            return True
         return self._validator.is_url_allowed(url)
 
     def check_scope(self, target: str) -> tuple[bool, str]:
         """Check scope and return (allowed, reason)."""
+        if not self.strict:
+            return True, f"Target '{target}' allowed (Permissive AI Intelligence Mode)"
         allowed = self.is_allowed(target)
         if allowed:
             return True, f"Target '{target}' is within scope"
@@ -94,6 +112,7 @@ class ScopeManager:
     def summary(self) -> dict[str, Any]:
         """Return a summary of the current scope."""
         return {
+            "mode": "Strict (Enforced)" if self.strict else "Permissive (Deep AI & Correlation)",
             "domains": self._scope.domains,
             "ips": self._scope.ips,
             "ports": self._scope.ports or "all",

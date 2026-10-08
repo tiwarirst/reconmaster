@@ -108,13 +108,13 @@ class BucketEnumModule(ReconModule):
             self.config.name, target=f"{domain} ({len(names)} candidates)"
         )
 
-        # Run all three providers concurrently
+        # Run all three providers concurrently with high concurrency
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(8.0, connect=4.0),
+            timeout=httpx.Timeout(5.0, connect=2.5),
             follow_redirects=False,
             verify=False,   # Buckets may have cert mismatches
         ) as client:
-            semaphore = asyncio.Semaphore(15)  # Max 15 concurrent probes
+            semaphore = asyncio.Semaphore(30)  # Max 30 concurrent probes
             tasks = [
                 self._probe_all_providers(client, semaphore, name)
                 for name in names

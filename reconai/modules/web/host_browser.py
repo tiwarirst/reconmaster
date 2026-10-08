@@ -77,18 +77,20 @@ class HostBrowserCrawlerModule(ReconModule):
         start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{len(target_urls)} URLs")
 
+        profile = kwargs.get("profile", "quick")
+
         if await self._is_browser_available(cdp_endpoint):
             self.logger.info(
                 f"[STEALTH] Connected to real browser at {cdp_endpoint} — "
                 f"using your live sessions (max stealth mode)"
             )
-            await self._run_cdp_mode(cdp_endpoint, target_urls, max_pages)
+            await self._run_cdp_mode(cdp_endpoint, target_urls, max_pages, profile=profile)
         else:
             self.logger.warning(
                 f"[STEALTH] Real browser not found at {cdp_endpoint}. "
                 "Launching hardened stealth headless browser..."
             )
-            await self._run_stealth_headless(target_urls, max_pages)
+            await self._run_stealth_headless(target_urls, max_pages, profile=profile)
 
         duration = time.monotonic() - start
         self.logger.module_complete(self.config.name, duration=duration)
@@ -96,7 +98,9 @@ class HostBrowserCrawlerModule(ReconModule):
     # ────────────────────────────────────────────────────────────────────────
     # CDP Mode — Real browser with live sessions
     # ────────────────────────────────────────────────────────────────────────
-    async def _run_cdp_mode(self, endpoint: str, target_urls: list[str], max_pages: int) -> None:
+    async def _run_cdp_mode(
+        self, endpoint: str, target_urls: list[str], max_pages: int, profile: str = "quick"
+    ) -> None:
         screenshot_dir = self.out_dir / "screenshots" / "host_browser"
         screenshot_dir.mkdir(parents=True, exist_ok=True)
 
@@ -119,6 +123,7 @@ class HostBrowserCrawlerModule(ReconModule):
                     scope_host=scope_host,
                     max_pages=max_pages,
                     is_real_browser=True,
+                    profile=profile,
                 )
 
             # Do NOT close the context — it's the user's real browser
@@ -129,7 +134,9 @@ class HostBrowserCrawlerModule(ReconModule):
     # ────────────────────────────────────────────────────────────────────────
     # Stealth Headless Mode — Hardened against bot detection
     # ────────────────────────────────────────────────────────────────────────
-    async def _run_stealth_headless(self, target_urls: list[str], max_pages: int) -> None:
+    async def _run_stealth_headless(
+        self, target_urls: list[str], max_pages: int, profile: str = "quick"
+    ) -> None:
         screenshot_dir = self.out_dir / "screenshots" / "stealth_headless"
         screenshot_dir.mkdir(parents=True, exist_ok=True)
 
@@ -211,9 +218,12 @@ class HostBrowserCrawlerModule(ReconModule):
                     scope_host=scope_host,
                     max_pages=max_pages,
                     is_real_browser=False,
+                    profile=profile,
                 )
-                # Long delay between different root URLs to avoid rate limiting
-                await human_delay(3000, 8000)
+                if profile == "stealth":
+                    await human_delay(3000, 8000)
+                else:
+                    await asyncio.sleep(0.3)
 
             await browser.close()
 
@@ -234,12 +244,26 @@ class HostBrowserCrawlerModule(ReconModule):
         is_real_browser: bool,
         depth: int = 0,
         max_depth: int = 3,
+        profile: str = "quick",
     ) -> None:
         if url in discovered or len(discovered) >= max_pages or depth > max_depth:
             return
 
         discovered.add(url)
         page = await context.new_page()
+
+        # Abort heavy non-essential media during crawl phase to speed up page rendering
+        async def _route_filter(route: Any) -> None:
+            if route.request.resource_type in ("media", "font"):
+                await route.abort()
+            else:
+                await route.continue_()
+
+        if profile != "stealth":
+            try:
+                await page.route("**/*", _route_filter)
+            except Exception:
+                pass
 
         # ── Inject stealth JS BEFORE page loads (init script) ────────────
         if not is_real_browser:
@@ -256,25 +280,23 @@ class HostBrowserCrawlerModule(ReconModule):
 
         try:
             # ── Navigate with realistic wait strategy ─────────────────────
-            await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
 
-            # ── Human-like behaviour after page loads ─────────────────────
-            # Wait for network to settle
-            try:
-                await page.wait_for_load_state("networkidle", timeout=8000)
-            except PlaywrightTimeout:
-                pass  # Some pages never reach networkidle — that's fine
-
-            # Simulate reading the page
-            await human_delay(1500, 4000)
-
-            # Move mouse naturally
-            await human_mouse_move(page)
-            await human_delay(500, 1500)
-
-            # Scroll through the page like a reader
-            await human_scroll(page)
-            await human_delay(800, 2500)
+            # ── Adaptive behaviour after page loads ───────────────────────
+            if profile == "stealth":
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=8000)
+                except PlaywrightTimeout:
+                    pass
+                await human_delay(1500, 4000)
+                await human_mouse_move(page)
+                await human_delay(500, 1500)
+                await human_scroll(page)
+                await human_delay(800, 2500)
+            else:
+                # Fast mode: natural mouse move and quick settle
+                await human_mouse_move(page)
+                await asyncio.sleep(0.4)
 
             # ── Screenshot ────────────────────────────────────────────────
             safe_name = (
@@ -340,10 +362,15 @@ class HostBrowserCrawlerModule(ReconModule):
         self.logger.info(
             f"[STEALTH] Saving {len(discovered)} pages, {len(api_calls)} API calls..."
         )
+        url_records = [
+            URLRecord(scan_id=self.scan_id, url=url, method="GET", source=source)
+            for url in discovered
+        ]
+        if url_records:
+            self.db.insert_urls_batch(url_records)
+
         for url in discovered:
-            record = URLRecord(scan_id=self.scan_id, url=url, method="GET", source=source)
-            self.db.insert_url(record)
-            await self.event_bus.emit_discovery(
+            await self.events.emit_discovery(
                 event_type=EventType.URL_DISCOVERED,
                 source=source,
                 data={"url": url, "source": source},
@@ -351,14 +378,20 @@ class HostBrowserCrawlerModule(ReconModule):
                 target=self.target,
             )
 
-        for api_url in api_calls:
-            record = URLRecord(
+        api_url_records = [
+            URLRecord(
                 scan_id=self.scan_id, url=api_url,
                 method="GET", source=f"{source}_api", depth=1
             )
-            self.db.insert_url(record)
+            for api_url in api_calls
+        ]
+        if api_url_records:
+            self.db.insert_urls_batch(api_url_records)
+
+        api_records = []
+        for api_url in api_calls:
             parsed_api = urlparse(api_url)
-            self.db.insert_api_endpoint(APIEndpoint(
+            api_records.append(APIEndpoint(
                 scan_id=self.scan_id,
                 host=f"{parsed_api.scheme}://{parsed_api.netloc}",
                 method="GET",
@@ -367,6 +400,8 @@ class HostBrowserCrawlerModule(ReconModule):
                 source=f"{source}_api",
                 api_type="XHR/Fetch",
             ))
+        if api_records:
+            self.db.insert_api_endpoints_batch(api_records)
 
     async def _get_target_urls(self) -> list[str]:
         urls = self.db.get_urls(self.scan_id)

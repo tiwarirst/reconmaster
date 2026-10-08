@@ -5,6 +5,7 @@ Uses Click to provide a professional, structured command-line interface.
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,7 @@ import reconai.modules.passive.saas_enum
 import reconai.modules.web.api_miner
 import reconai.modules.web.dev_artifacts
 import reconai.modules.active.cdn_classifier
+import reconai.modules.web.screenshot
 
 
 @click.group()
@@ -86,6 +88,10 @@ def _execute_pipeline(
     timeout: int | None = None,
     dry_run: bool = False,
     ai: bool = False,
+    strict_scope: bool = False,
+    scope_file: str | None = None,
+    ai_url: str | None = None,
+    ai_model: str | None = None,
 ) -> None:
     """Shared execution engine for all pipeline commands."""
     console: ReconConsole = ctx.obj["console"]
@@ -101,47 +107,128 @@ def _execute_pipeline(
         console.info(f"[DRY RUN] Target: {target}")
         console.info(f"[DRY RUN] Mode: {mode} — {mode_def.get('description', '')}")
         console.info(f"[DRY RUN] Profile: {profile}")
+        console.info(f"[DRY RUN] Scope: {'Strict (Enforced)' if strict_scope or scope_file else 'Permissive (Deep AI & Correlation)'}")
         console.info(f"[DRY RUN] Modules to run ({len(mode_def.get('modules', []))} total):")
         for m in mode_def.get("modules", []):
             console.console.print(f"  [dim]  • {m}[/dim]")
         return
 
-    scope = ScopeManager.for_target(target)
+    # Scope configuration: permissive by default so maximum data is gathered for AI synthesis and correlation!
+    if scope_file and Path(scope_file).is_file():
+        scope = ScopeManager.from_yaml(Path(scope_file), strict=True)
+    else:
+        scope = ScopeManager.for_target(target, strict=strict_scope)
+
     orchestrator = Orchestrator(target, config_mgr, scope, console)
 
     async def _run() -> None:
-        await orchestrator.prepare_scan(mode=mode, profile=profile)
+        await orchestrator.prepare_scan(mode=mode, profile=profile, timeout_override=timeout)
         await orchestrator.run()
 
-        # Generate Report
-        console.info("Generating reports...")
-        generator = ReportGenerator(orchestrator.db, orchestrator.scan_id, orchestrator.out_dir)
-        reports = generator.generate_all()
-        console.success(f"HTML report: {reports.get('html', '')}")
-        console.success(f"All reports saved to: {reports['markdown'].parent}")
+        # Automated PoC Generation for all confirmed findings (fail-safe)
+        findings = orchestrator.db.get_findings(orchestrator.scan_id)
+        if findings:
+            try:
+                from reconai.intelligence.poc_generator import PoCGenerator
+                poc_gen = PoCGenerator()
+                pocs_dir = orchestrator.out_dir / "pocs"
+                pocs_dir.mkdir(parents=True, exist_ok=True)
+                pocs_created = 0
+                for idx, finding in enumerate(findings, start=1):
+                    try:
+                        poc = poc_gen.generate(finding)
+                        raw_title = str(finding.get("title") or f"vuln_{idx}")
+                        clean_slug = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_title).strip("_").lower()[:40]
+                        slug = clean_slug if clean_slug else f"finding_{idx}"
+                        if poc.python_script:
+                            py_path = pocs_dir / f"poc_{idx}_{slug}.py"
+                            py_path.write_text(poc.python_script, encoding="utf-8")
+                        if poc.curl_command:
+                            sh_path = pocs_dir / f"poc_{idx}_{slug}.sh"
+                            sh_path.write_text(f"#!/usr/bin/env bash\n# Reproduction curl for: {raw_title}\n{poc.curl_command}\n", encoding="utf-8")
+                        if poc.nuclei_template:
+                            yaml_path = pocs_dir / f"poc_{idx}_{slug}.yaml"
+                            yaml_path.write_text(poc.nuclei_template, encoding="utf-8")
+                        pocs_created += 1
+                    except Exception as exc:
+                        console.debug(f"Could not generate PoC verification artifact for finding #{idx}: {exc}")
+                if pocs_created:
+                    console.success(f"Generated {pocs_created} runnable PoC verification packages in: {pocs_dir}")
+            except Exception as exc:
+                console.warning(f"PoC generation skipped due to unexpected error: {exc}")
 
-        # AI Analysis (when requested or in deep/cloud/vuln mode)
+        # AI Analysis (when requested or in deep/cloud/vuln mode) - fail-safe against remote network/GPU disconnects
+        ai_summary = ""
+        ai_model_name = ""
+        attack_chain = ""
+        effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
+        effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
         if ai or mode in ("deep", "cloud", "vuln"):
-            from reconai.ai.local import OllamaAdapter
-            from reconai.ai.analyzer import Analyzer
-            llm = OllamaAdapter()
-            if await llm.is_available():
-                console.info(f"Running AI analysis with local LLM ('{llm.model}')...")
-                analyzer = Analyzer(llm, orchestrator.db, orchestrator.scan_id)
-                summary = await analyzer.summarize_findings()
-                console.console.print(f"\n[bold cyan]AI Summary ({llm.model}):[/bold cyan]\n{summary}\n")
+            try:
+                from reconai.ai.local import OllamaAdapter
+                from reconai.ai.analyzer import Analyzer
+                llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
+                if await llm.is_available():
+                    ai_model_name = llm.model
+                    console.info(f"Running AI analysis with LLM ('{llm.model}') at {llm.base_url}...")
+                    analyzer = Analyzer(llm, orchestrator.db, orchestrator.scan_id)
+                    ai_summary = await analyzer.summarize_findings()
+                    attack_chain = await analyzer.generate_attack_chain()
+                    console.console.print(f"\n[bold cyan]AI Summary ({llm.model} @ {llm.base_url}):[/bold cyan]\n{ai_summary}\n")
+                    if attack_chain and "Not enough findings" not in attack_chain:
+                        console.console.print(f"\n[bold magenta]AI Correlated Attack Kill Chain ({llm.model}):[/bold magenta]\n{attack_chain}\n")
 
-                # Persist AI report to reports directory
-                ai_file = orchestrator.out_dir / "reports" / "ai_analysis.md"
-                ai_file.write_text(f"# AI Threat Assessment: {target}\n\n**Model:** `{llm.model}`\n\n{summary}\n", encoding="utf-8")
-                console.success(f"AI Report saved to: {ai_file}")
-            elif ai:
-                console.warning(
-                    "Local LLM (Ollama) is not running or has no models installed. "
-                    "To enable AI analysis, download Ollama from https://ollama.com and run: ollama pull llama3"
-                )
+                    # Persist standalone AI report to reports directory
+                    reports_dir = orchestrator.out_dir / "reports"
+                    reports_dir.mkdir(parents=True, exist_ok=True)
+                    ai_file = reports_dir / "ai_analysis.md"
+                    content = f"# AI Threat Assessment: {target}\n\n**Model:** `{llm.model}` (`{llm.base_url}`)\n\n{ai_summary}\n"
+                    if attack_chain and "Not enough findings" not in attack_chain:
+                        content += f"\n## Correlated Attack Kill Chain\n\n{attack_chain}\n"
+                    ai_file.write_text(content, encoding="utf-8")
+                    console.success(f"AI Report saved to: {ai_file}")
+                elif ai:
+                    console.warning(
+                        f"Could not connect to Ollama at '{llm.base_url}'. "
+                        "If your GPU machine is running Ollama remotely, ensure OLLAMA_HOST=0.0.0.0:11434 is set on the GPU host, "
+                        "or create an SSH tunnel: ssh -L 11434:localhost:11434 user@<gpu-ip>"
+                    )
+            except Exception as exc:
+                console.warning(f"AI intelligence analysis failed: {exc}")
 
-    asyncio.run(_run())
+        # Generate Report (incorporating AI findings & threat intelligence) - fail-safe
+        try:
+            console.info("Generating reports...")
+            generator = ReportGenerator(
+                orchestrator.db,
+                orchestrator.scan_id,
+                orchestrator.out_dir,
+                ai_summary=ai_summary,
+                ai_model=ai_model_name,
+                attack_chain=attack_chain,
+            )
+            reports = generator.generate_all()
+            if "html" in reports:
+                console.success(f"HTML report: {reports['html']}")
+            if "markdown" in reports:
+                console.success(f"All reports saved to: {reports['markdown'].parent}")
+        except Exception as exc:
+            console.error(f"Error during report file generation: {exc}")
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        console.warning("\nScan interrupted by user (Ctrl+C). Partial scan results were safely preserved in database.")
+    except Exception as exc:
+        console.error(f"Scan pipeline execution error: {exc}")
+        # Emergency attempt to output collected scan artifacts if possible
+        try:
+            generator = ReportGenerator(orchestrator.db, orchestrator.scan_id, orchestrator.out_dir)
+            reports = generator.generate_all()
+            if "markdown" in reports:
+                console.info(f"Emergency report saved to: {reports['markdown'].parent}")
+        except Exception:
+            pass
 
 
 @cli.command()
@@ -150,21 +237,27 @@ def _execute_pipeline(
 @click.option("-p", "--profile", type=click.Choice(["quick", "standard", "service", "full"]), default="quick", help="Port scan profile")
 @click.option("--timeout", type=int, help="Global timeout override (seconds)")
 @click.option("--dry-run", is_flag=True, help="Show what would be run without executing")
-@click.option("--ai", is_flag=True, help="Use local Ollama LLM for AI-powered analysis")
+@click.option("--ai", is_flag=True, help="Use local or remote Ollama LLM for AI-powered analysis")
+@click.option("--ai-url", type=str, help="Ollama server URL (e.g. http://192.168.1.50:11434 for remote GPU)")
+@click.option("--ai-model", type=str, help="Ollama model name (e.g. llama3, deepseek-r1:7b)")
+@click.option("--strict-scope", is_flag=True, help="Strictly limit discovery to provided target (default is permissive for deep AI data)")
+@click.option("--scope-file", type=click.Path(exists=True), help="Path to scope YAML file for explicit boundary rules")
 @click.pass_context
-def scan(ctx: click.Context, target: str, mode: str, profile: str, timeout: int | None, dry_run: bool, ai: bool) -> None:
+def scan(ctx: click.Context, target: str, mode: str, profile: str, timeout: int | None, dry_run: bool, ai: bool, ai_url: str | None, ai_model: str | None, strict_scope: bool, scope_file: str | None) -> None:
     """Run an orchestrated reconnaissance scan against a target."""
-    _execute_pipeline(ctx, target, mode=mode, profile=profile, timeout=timeout, dry_run=dry_run, ai=ai)
+    _execute_pipeline(ctx, target, mode=mode, profile=profile, timeout=timeout, dry_run=dry_run, ai=ai, ai_url=ai_url, ai_model=ai_model, strict_scope=strict_scope, scope_file=scope_file)
 
 
 @cli.command()
 @click.argument("target")
 @click.option("--dry-run", is_flag=True, help="Show what would be run without executing")
 @click.option("--timeout", type=int, help="Global timeout override (seconds)")
+@click.option("--strict-scope", is_flag=True, help="Strictly limit discovery to provided target (default is permissive for deep AI data)")
+@click.option("--scope-file", type=click.Path(exists=True), help="Path to scope YAML file")
 @click.pass_context
-def subs(ctx: click.Context, target: str, dry_run: bool, timeout: int | None) -> None:
+def subs(ctx: click.Context, target: str, dry_run: bool, timeout: int | None, strict_scope: bool, scope_file: str | None) -> None:
     """Dedicated Subdomain Intelligence Pipeline (DNS, CT logs, archive, DNSx, active tools)."""
-    _execute_pipeline(ctx, target, mode="subs", dry_run=dry_run, timeout=timeout)
+    _execute_pipeline(ctx, target, mode="subs", dry_run=dry_run, timeout=timeout, strict_scope=strict_scope, scope_file=scope_file)
 
 
 @cli.command()
@@ -172,48 +265,62 @@ def subs(ctx: click.Context, target: str, dry_run: bool, timeout: int | None) ->
 @click.option("-p", "--profile", type=click.Choice(["quick", "standard", "service", "full"]), default="quick", help="Port scan profile")
 @click.option("--dry-run", is_flag=True, help="Show what would be run without executing")
 @click.option("--timeout", type=int, help="Global timeout override (seconds)")
+@click.option("--strict-scope", is_flag=True, help="Strictly limit discovery to provided target (default is permissive for deep AI data)")
+@click.option("--scope-file", type=click.Path(exists=True), help="Path to scope YAML file")
 @click.pass_context
-def ports(ctx: click.Context, target: str, profile: str, dry_run: bool, timeout: int | None) -> None:
+def ports(ctx: click.Context, target: str, profile: str, dry_run: bool, timeout: int | None, strict_scope: bool, scope_file: str | None) -> None:
     """Dedicated Port & Service Detection Pipeline (DNS, Naabu, Nmap, TCP connect, CDN classifier)."""
-    _execute_pipeline(ctx, target, mode="ports", profile=profile, dry_run=dry_run, timeout=timeout)
+    _execute_pipeline(ctx, target, mode="ports", profile=profile, dry_run=dry_run, timeout=timeout, strict_scope=strict_scope, scope_file=scope_file)
 
 
 @cli.command()
 @click.argument("target")
 @click.option("--dry-run", is_flag=True, help="Show what would be run without executing")
 @click.option("--timeout", type=int, help="Global timeout override (seconds)")
+@click.option("--strict-scope", is_flag=True, help="Strictly limit discovery to provided target (default is permissive for deep AI data)")
+@click.option("--scope-file", type=click.Path(exists=True), help="Path to scope YAML file")
 @click.pass_context
-def web(ctx: click.Context, target: str, dry_run: bool, timeout: int | None) -> None:
+def web(ctx: click.Context, target: str, dry_run: bool, timeout: int | None, strict_scope: bool, scope_file: str | None) -> None:
     """Dedicated Web Attack Surface Pipeline (HTTP probe, tech stack, headers, WAF, crawl, dir, screenshot)."""
-    _execute_pipeline(ctx, target, mode="web", dry_run=dry_run, timeout=timeout)
+    _execute_pipeline(ctx, target, mode="web", dry_run=dry_run, timeout=timeout, strict_scope=strict_scope, scope_file=scope_file)
 
 
 @cli.command()
 @click.argument("target")
 @click.option("--dry-run", is_flag=True, help="Show what would be run without executing")
 @click.option("--timeout", type=int, help="Global timeout override (seconds)")
-@click.option("--ai", is_flag=True, help="Use local Ollama LLM for AI-powered cloud risk analysis")
+@click.option("--ai", is_flag=True, help="Use local or remote Ollama LLM for AI-powered cloud risk analysis")
+@click.option("--ai-url", type=str, help="Ollama server URL (e.g. http://192.168.1.50:11434 for remote GPU)")
+@click.option("--ai-model", type=str, help="Ollama model name (e.g. llama3, deepseek-r1:7b)")
+@click.option("--strict-scope", is_flag=True, help="Strictly limit discovery to provided target (default is permissive for deep AI data)")
+@click.option("--scope-file", type=click.Path(exists=True), help="Path to scope YAML file")
 @click.pass_context
-def cloud(ctx: click.Context, target: str, dry_run: bool, timeout: int | None, ai: bool) -> None:
+def cloud(ctx: click.Context, target: str, dry_run: bool, timeout: int | None, ai: bool, ai_url: str | None, ai_model: str | None, strict_scope: bool, scope_file: str | None) -> None:
     """Dedicated Cloud Attack Surface Pipeline (S3/GCS/Azure buckets, CNAME takeovers, SaaS, SSRF)."""
-    _execute_pipeline(ctx, target, mode="cloud", dry_run=dry_run, timeout=timeout, ai=ai)
+    _execute_pipeline(ctx, target, mode="cloud", dry_run=dry_run, timeout=timeout, ai=ai, ai_url=ai_url, ai_model=ai_model, strict_scope=strict_scope, scope_file=scope_file)
 
 
 @cli.command()
 @click.argument("target")
 @click.option("--dry-run", is_flag=True, help="Show what would be run without executing")
 @click.option("--timeout", type=int, help="Global timeout override (seconds)")
-@click.option("--ai", is_flag=True, help="Use local Ollama LLM for AI-powered exploit guidance")
+@click.option("--ai", is_flag=True, help="Use local or remote Ollama LLM for AI-powered exploit guidance")
+@click.option("--ai-url", type=str, help="Ollama server URL (e.g. http://192.168.1.50:11434 for remote GPU)")
+@click.option("--ai-model", type=str, help="Ollama model name (e.g. llama3, deepseek-r1:7b)")
+@click.option("--strict-scope", is_flag=True, help="Strictly limit discovery to provided target (default is permissive for deep AI data)")
+@click.option("--scope-file", type=click.Path(exists=True), help="Path to scope YAML file")
 @click.pass_context
-def vuln(ctx: click.Context, target: str, dry_run: bool, timeout: int | None, ai: bool) -> None:
+def vuln(ctx: click.Context, target: str, dry_run: bool, timeout: int | None, ai: bool, ai_url: str | None, ai_model: str | None, strict_scope: bool, scope_file: str | None) -> None:
     """Dedicated Vulnerability Pipeline (Nuclei, secrets, API miner, dev artifacts, Dalfox, SQLMap)."""
-    _execute_pipeline(ctx, target, mode="vuln", dry_run=dry_run, timeout=timeout, ai=ai)
+    _execute_pipeline(ctx, target, mode="vuln", dry_run=dry_run, timeout=timeout, ai=ai, ai_url=ai_url, ai_model=ai_model, strict_scope=strict_scope, scope_file=scope_file)
 
 
 @cli.command()
 @click.argument("target_or_scan_id")
+@click.option("--ai-url", type=str, help="Ollama server URL (e.g. http://192.168.1.50:11434 for remote GPU)")
+@click.option("--ai-model", type=str, help="Ollama model name (e.g. llama3, deepseek-r1:7b)")
 @click.pass_context
-def ai(ctx: click.Context, target_or_scan_id: str) -> None:
+def ai(ctx: click.Context, target_or_scan_id: str, ai_url: str | None, ai_model: str | None) -> None:
     """Dedicated AI Intelligence & Threat Assessment Pipeline."""
     console: ReconConsole = ctx.obj["console"]
     config_mgr: ConfigManager = ctx.obj["config_mgr"]
@@ -226,28 +333,51 @@ def ai(ctx: click.Context, target_or_scan_id: str) -> None:
             scan_dir = path
             break
 
+    effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
+    effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
+
     if scan_dir:
         from reconai.core.database.manager import DatabaseManager
         from reconai.ai.local import OllamaAdapter
         from reconai.ai.analyzer import Analyzer
         db = DatabaseManager(db_path=scan_dir / "reconai.db")
-        llm = OllamaAdapter()
+        llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
 
         async def _run_ai_on_scan() -> None:
             if not await llm.is_available():
-                console.warning("Ollama is not running. Please start Ollama (https://ollama.com).")
+                console.warning(
+                    f"Could not connect to Ollama at '{llm.base_url}'. "
+                    "If your GPU machine is running Ollama remotely, ensure OLLAMA_HOST=0.0.0.0:11434 is set on the GPU host, "
+                    "or create an SSH tunnel: ssh -L 11434:localhost:11434 user@<gpu-ip>"
+                )
                 return
             analyzer = Analyzer(llm, db, target_or_scan_id)
             summary = await analyzer.summarize_findings()
-            console.console.print(f"\n[bold cyan]AI Threat Assessment ({llm.model}):[/bold cyan]\n{summary}\n")
-            ai_file = scan_dir / "reports" / "ai_analysis.md"
-            ai_file.write_text(f"# AI Threat Assessment: {target_or_scan_id}\n\n**Model:** `{llm.model}`\n\n{summary}\n", encoding="utf-8")
+            attack_chain = await analyzer.generate_attack_chain()
+            console.console.print(f"\n[bold cyan]AI Threat Assessment ({llm.model} @ {llm.base_url}):[/bold cyan]\n{summary}\n")
+            if attack_chain and "Not enough findings" not in attack_chain:
+                console.console.print(f"\n[bold magenta]AI Correlated Attack Kill Chain ({llm.model}):[/bold magenta]\n{attack_chain}\n")
+
+            reports_dir = scan_dir / "reports"
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            ai_file = reports_dir / "ai_analysis.md"
+            content = f"# AI Threat Assessment: {target_or_scan_id}\n\n**Model:** `{llm.model}` (`{llm.base_url}`)\n\n{summary}\n"
+            if attack_chain and "Not enough findings" not in attack_chain:
+                content += f"\n## Correlated Attack Kill Chain\n\n{attack_chain}\n"
+            ai_file.write_text(content, encoding="utf-8")
             console.success(f"Saved AI report to: {ai_file}")
+
+            try:
+                gen = ReportGenerator(db, target_or_scan_id, scan_dir, ai_summary=summary, ai_model=llm.model, attack_chain=attack_chain)
+                gen.generate_all()
+                console.success(f"Updated HTML & Markdown reports with AI insights.")
+            except Exception as e:
+                console.debug(f"Report update skipped: {e}")
 
         asyncio.run(_run_ai_on_scan())
     else:
         # Run targeted standard scan with AI enabled
-        _execute_pipeline(ctx, target_or_scan_id, mode="standard", ai=True)
+        _execute_pipeline(ctx, target_or_scan_id, mode="standard", ai=True, ai_url=ai_url, ai_model=ai_model)
 
 
 
@@ -403,8 +533,10 @@ def compare(ctx: click.Context, old_scan_id: str, new_scan_id: str) -> None:
 @cli.command()
 @click.argument("scan_id")
 @click.argument("finding_title")
+@click.option("--ai-url", type=str, help="Ollama server URL (e.g. http://192.168.1.50:11434 for remote GPU)")
+@click.option("--ai-model", type=str, help="Ollama model name (e.g. llama3, deepseek-r1:7b)")
 @click.pass_context
-def exploit(ctx: click.Context, scan_id: str, finding_title: str) -> None:
+def exploit(ctx: click.Context, scan_id: str, finding_title: str, ai_url: str | None, ai_model: str | None) -> None:
     """Generate a Proof of Concept (PoC) exploit for a finding."""
     console: ReconConsole = ctx.obj["console"]
     config_mgr: ConfigManager = ctx.obj["config_mgr"]
@@ -437,21 +569,147 @@ def exploit(ctx: click.Context, scan_id: str, finding_title: str) -> None:
         
     from reconai.ai.local import OllamaAdapter
     from reconai.ai.analyzer import Analyzer
-    llm = OllamaAdapter()
+    effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
+    effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
+    llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
     
     async def _run() -> None:
-        if not await llm.is_available():
-            console.error("Local LLM (Ollama) is not available. Please install and run it.")
-            sys.exit(1)
-            
+        has_ai = await llm.is_available()
+        if not has_ai:
+            console.warning("Local/Remote LLM (Ollama) is not running. Generating deterministic verification PoC package...")
+        else:
+            console.info(f"Generating PoC exploit and analysis for: {target_finding['title']} using {llm.model} at {llm.base_url}...")
+
         analyzer = Analyzer(llm, db, scan_id)
-        console.info(f"Generating PoC exploit and analysis for: {target_finding['title']}...")
         result = await analyzer.generate_exploit_poc(target_finding)
-        
+
         console.banner()
         console.console.print(f"[bold red]Exploit Analysis & PoC:[/bold red]\n\n{result}")
 
     asyncio.run(_run())
+
+
+@cli.command()
+@click.argument("scan_path_or_id")
+@click.option("--ai", is_flag=True, help="Run AI threat assessment with Ollama during report generation")
+@click.option("--ai-url", type=str, help="Ollama server URL (e.g. http://<GPU_IP>:11434)")
+@click.option("--ai-model", type=str, help="Ollama model name (e.g. deepseek-r1:8b)")
+@click.pass_context
+def report(ctx: click.Context, scan_path_or_id: str, ai: bool, ai_url: str | None, ai_model: str | None) -> None:
+    """Generate or re-generate reports (HTML, Markdown, JSON, PoCs) from an existing scan directory or scan ID."""
+    console: ReconConsole = ctx.obj["console"]
+    config_mgr: ConfigManager = ctx.obj["config_mgr"]
+
+    # 1. Locate the scan directory and database
+    cand = Path(scan_path_or_id)
+    scan_dir: Path | None = None
+    if cand.is_dir() and (cand / "reconai.db").exists():
+        scan_dir = cand.resolve()
+    else:
+        # Search base output dir
+        base_out = Path(config_mgr.config.output.base_dir)
+        for p in base_out.rglob(scan_path_or_id):
+            if p.is_dir() and (p / "reconai.db").exists():
+                scan_dir = p.resolve()
+                break
+
+    if not scan_dir:
+        console.error(f"Scan directory with 'reconai.db' not found for: {scan_path_or_id}")
+        sys.exit(1)
+
+    db_path = scan_dir / "reconai.db"
+    from reconai.core.database.manager import DatabaseManager
+    db = DatabaseManager(db_path=db_path)
+
+    # Resolve scan metadata from db or directory structure
+    scans = db.list_scans(limit=1)
+    scan_id = scans[0]["id"] if scans else scan_dir.name
+    target = scans[0]["target"] if scans else scan_dir.parent.name
+
+    console.banner()
+    console.info(f"Generating reports for target: [bold cyan]{target}[/bold cyan] (Scan: {scan_id})")
+
+    # Generate PoCs for findings
+    findings = db.get_findings(scan_id)
+    if findings:
+        from reconai.intelligence.poc_generator import PoCGenerator
+        poc_gen = PoCGenerator()
+        pocs_dir = scan_dir / "pocs"
+        pocs_dir.mkdir(parents=True, exist_ok=True)
+        pocs_created = 0
+        for idx, finding in enumerate(findings, start=1):
+            try:
+                poc = poc_gen.generate(finding)
+                raw_title = str(finding.get("title") or f"vuln_{idx}")
+                clean_slug = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_title).strip("_").lower()[:40]
+                slug = clean_slug if clean_slug else f"finding_{idx}"
+                if poc.python_script:
+                    (pocs_dir / f"poc_{idx}_{slug}.py").write_text(poc.python_script, encoding="utf-8")
+                if poc.curl_command:
+                    (pocs_dir / f"poc_{idx}_{slug}.sh").write_text(
+                        f"#!/usr/bin/env bash\n# Reproduction curl for: {raw_title}\n{poc.curl_command}\n", encoding="utf-8"
+                    )
+                if poc.nuclei_template:
+                    (pocs_dir / f"poc_{idx}_{slug}.yaml").write_text(poc.nuclei_template, encoding="utf-8")
+                pocs_created += 1
+            except Exception as exc:
+                console.debug(f"PoC generation skipped for finding #{idx}: {exc}")
+        if pocs_created:
+            console.success(f"Generated {pocs_created} runnable PoC verification packages in: {pocs_dir}")
+
+    # Optional AI analysis
+    ai_summary = ""
+    ai_model_name = ""
+    attack_chain = ""
+    effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
+    effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
+    if ai:
+        from reconai.ai.local import OllamaAdapter
+        from reconai.ai.analyzer import Analyzer
+        llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
+
+        async def _run_ai() -> None:
+            nonlocal ai_summary, ai_model_name, attack_chain
+            if await llm.is_available():
+                ai_model_name = llm.model
+                console.info(f"Running AI analysis with LLM ('{llm.model}') at {llm.base_url}...")
+                analyzer = Analyzer(llm, db, scan_id)
+                ai_summary = await analyzer.summarize_findings()
+                attack_chain = await analyzer.generate_attack_chain()
+                console.console.print(f"\n[bold cyan]AI Summary ({llm.model} @ {llm.base_url}):[/bold cyan]\n{ai_summary}\n")
+                if attack_chain and "Not enough findings" not in attack_chain:
+                    console.console.print(f"\n[bold magenta]AI Correlated Attack Kill Chain ({llm.model}):[/bold magenta]\n{attack_chain}\n")
+                reports_dir = scan_dir / "reports"
+                reports_dir.mkdir(parents=True, exist_ok=True)
+                ai_file = reports_dir / "ai_analysis.md"
+                content = f"# AI Threat Assessment: {target}\n\n**Model:** `{llm.model}` (`{llm.base_url}`)\n\n{ai_summary}\n"
+                if attack_chain and "Not enough findings" not in attack_chain:
+                    content += f"\n## Correlated Attack Kill Chain\n\n{attack_chain}\n"
+                ai_file.write_text(content, encoding="utf-8")
+            else:
+                console.warning(f"Could not connect to Ollama at '{llm.base_url}'.")
+
+        asyncio.run(_run_ai())
+
+    # Generate Reports
+    reports_dir = scan_dir / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    generator = ReportGenerator(
+        db,
+        scan_id,
+        scan_dir,
+        ai_summary=ai_summary,
+        ai_model=ai_model_name,
+        attack_chain=attack_chain,
+    )
+    reports = generator.generate_all()
+    if "html" in reports:
+        console.success(f"HTML report: {reports['html']}")
+    if "markdown" in reports:
+        console.success(f"Markdown report: {reports['markdown']}")
+    if "json" in reports:
+        console.success(f"JSON report: {reports['json']}")
+    console.success(f"All reports saved to: {reports_dir}")
 
 
 if __name__ == "__main__":

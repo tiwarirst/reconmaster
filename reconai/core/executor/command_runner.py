@@ -19,7 +19,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from reconai.core.executor.process_manager import ProcessManager
 from reconai.core.executor.result import CommandResult, CommandStatus
@@ -71,6 +71,7 @@ class CommandRunner:
         env: dict[str, str] | None = None,
         validate_args: bool = True,
         shell: bool = False,
+        on_output: Callable[[str], None] | None = None,
     ) -> CommandResult:
         """Execute an external command and return a structured result.
 
@@ -82,6 +83,7 @@ class CommandRunner:
             env: Additional environment variables.
             validate_args: Whether to validate arguments for dangerous chars.
             shell: Whether to use shell=True (discouraged).
+            on_output: Optional execution-specific callback for real-time output.
 
         Returns:
             CommandResult with all execution metadata.
@@ -123,12 +125,14 @@ class CommandRunner:
         start_time = time.monotonic()
         started_at = datetime.now()
 
+        cb = on_output or self._on_output
+
         try:
             async with StreamHandler(
                 module_name=self._module_name.upper(),
                 output_file=output_file,
-                on_stdout=self._on_output,
-                on_stderr=self._on_output,
+                on_stdout=cb,
+                on_stderr=cb,
             ) as stream_handler:
 
                 # Start process

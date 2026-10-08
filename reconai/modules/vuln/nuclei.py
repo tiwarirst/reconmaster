@@ -60,9 +60,7 @@ class NucleiModule(ReconModule):
         self.logger.module_start(self.config.name, target=f"{len(urls)} URLs")
 
         if has_nuclei:
-            semaphore = asyncio.Semaphore(2)
-            tasks = [self._scan_url(adapter, semaphore, url) for url in urls]
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await self._scan_batch(adapter, urls)
         else:
             self.record_warning(
                 "Nuclei not installed in PATH. Install: 'go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest' (or 'sudo apt install nuclei'). "
@@ -73,61 +71,52 @@ class NucleiModule(ReconModule):
         duration = time.monotonic() - start
         self.logger.module_complete(self.config.name, duration=duration)
 
-    async def _scan_url(
-        self,
-        adapter: NucleiAdapter,
-        semaphore: asyncio.Semaphore,
-        url: str,
-    ) -> None:
-        """Scan a single URL.
+    async def _scan_batch(self, adapter: NucleiAdapter, urls: list[str]) -> None:
+        """Run Nuclei in unified batch mode across discovered endpoints."""
+        prioritized_urls: list[str] = []
+        seen = set()
+        for u in urls:
+            if u not in seen:
+                seen.add(u)
+                prioritized_urls.append(u)
+            if len(prioritized_urls) >= 60:
+                break
 
-        Temp file lifecycle:
-          1. Created here, before build_command.
-          2. Path passed to adapter — adapter writes to it via -o flag.
-          3. Path passed to parse_output_file after process exits.
-          4. Always deleted in finally — no leaks.
-        """
-        async with semaphore:
-            tmp_path: Path | None = None
-            try:
-                # Create isolated output file for this specific invocation
-                with tempfile.NamedTemporaryFile(
-                    suffix=".jsonl", delete=False, prefix="nuclei_"
-                ) as tmp:
-                    tmp_path = Path(tmp.name)
+        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w", encoding="utf-8") as targets_file:
+            for u in prioritized_urls:
+                targets_file.write(f"{u}\n")
+            targets_path = Path(targets_file.name)
 
-                cmd = adapter.build_command(target=url, output_file=tmp_path)
-                await self.runner.run(command=cmd, timeout=600)
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False, prefix="nuclei_") as out_tmp:
+            out_path = Path(out_tmp.name)
 
-                # parse_output_file works correctly even if Nuclei timed out —
-                # every JSONL line written before the kill is independently valid.
-                findings = adapter.parse_output_file(tmp_path)
+        try:
+            cmd = adapter.build_command(targets_file=targets_path, output_file=out_path)
+            await self.runner.run(command=cmd, timeout=min(180, self.timeout))
 
-                for finding in findings:
-                    finding.scan_id = self.scan_id
-                    self.db.insert_finding(finding)
-                    await self.events.emit_discovery(
-                        event_type=EventType.FINDING_DISCOVERED,
-                        source=self.config.name,
-                        data={
-                            "title": finding.title,
-                            "severity": finding.severity.value,
-                            "asset": finding.affected_asset,
-                            "cve": finding.cve_id or "",
-                        },
-                        scan_id=self.scan_id,
-                        target=self.target,
-                    )
-
-            except Exception as exc:
-                self.logger.debug(
-                    f"Nuclei scan failed for {url}: {exc}",
-                    module=self.config.name,
+            findings = adapter.parse_output_file(out_path)
+            for finding in findings:
+                finding.scan_id = self.scan_id
+                self.db.insert_finding(finding)
+                await self.events.emit_discovery(
+                    event_type=EventType.FINDING_DISCOVERED,
+                    source=self.config.name,
+                    data={
+                        "title": finding.title,
+                        "severity": finding.severity.value,
+                        "asset": finding.affected_asset,
+                        "cve": finding.cve_id or "",
+                    },
+                    scan_id=self.scan_id,
+                    target=self.target,
                 )
-            finally:
-                # Guaranteed cleanup — no temp files left on disk
-                if tmp_path and tmp_path.exists():
-                    tmp_path.unlink(missing_ok=True)
+            if findings:
+                self.logger.info(f"Discovered {len(findings)} vulnerability findings via Nuclei", module=self.config.name)
+        except Exception as exc:
+            self.logger.warning(f"Nuclei execution: {exc}", module=self.config.name)
+        finally:
+            targets_path.unlink(missing_ok=True)
+            out_path.unlink(missing_ok=True)
 
     async def _python_vuln_probes(self, urls: list[str]) -> None:
         """Pure-Python high-value vulnerability, misconfiguration, and exposure probe."""

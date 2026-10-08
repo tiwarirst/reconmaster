@@ -69,7 +69,10 @@ class Event(BaseModel):
 
     @property
     def is_discovery(self) -> bool:
-        return self.type.value.endswith(".discovered") or self.type == EventType.HOST_RESOLVED
+        return (
+            self.type.value.endswith(".discovered")
+            or self.type in (EventType.HOST_RESOLVED, EventType.TECHNOLOGY_DETECTED)
+        )
 
     @property
     def is_module_event(self) -> bool:

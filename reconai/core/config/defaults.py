@@ -106,24 +106,32 @@ SCAN_MODES = {
             "dns_enum", "whois", "cert_transparency", "archive_urls",
             "dnsx", "http_probe", "naabu_ports", "ports", "cdn_classifier",
             "technologies", "headers", "waf_detection", "email_security",
-            "saas_enum", "directory_discovery", "crawler", "api_miner", "dev_artifacts",
-            "screenshot",
+            "saas_enum", "crawler", "directory_discovery", "api_miner", "dev_artifacts",
+            "vuln_intelligence", "screenshot",
         ],
         "description": "Standard reconnaissance — passive + active ports + tech + web crawl + directory + screenshots",
     },
     "deep": {
         "modules": [
+            # Stage 1: Asset & Subdomain Discovery (Passive + Active)
             "dns_enum", "whois", "cert_transparency", "archive_urls",
-            "paramspider", "dnsx", "email_security", "saas_enum",
-            "http_probe", "naabu_ports", "ports", "cdn_classifier", "subdomains_active",
+            "paramspider", "subdomains_active",
+            # Stage 2: DNS & IP Resolution
+            "dnsx",
+            # Stage 3: Service & Port Exposure
+            "http_probe", "naabu_ports", "ports", "cdn_classifier",
+            "email_security", "saas_enum",
+            # Stage 4: Web Surface, Fingerprinting & Deep Crawl
             "technologies", "headers", "waf_detection",
-            "crawler", "ffuf_dir", "directory_discovery",
+            "crawler", "katana_crawler", "js_analysis",
+            "ffuf_dir", "directory_discovery",
             "api_miner", "dev_artifacts",
-            "katana_crawler", "js_analysis",
-            "nuclei_vuln", "secrets", "sqlmap", "dalfox",
-            "vuln_intelligence", "screenshot",
-            # Cloud enumeration
-            "bucket_enum", "cloud_enum_module", "metadata_ssrf", "iam_analyzer",
+            # Stage 5: Cloud Enumeration & Credential Analysis
+            "secrets", "iam_analyzer", "bucket_enum", "cloud_enum_module", "metadata_ssrf",
+            # Stage 6: Vulnerability Assessment & Exploitation Validation
+            "nuclei_vuln", "sqlmap", "dalfox", "vuln_intelligence",
+            # Stage 7: Visual Verification
+            "screenshot",
         ],
         "description": "Deep reconnaissance — full active scan, fuzzing, vuln detection, and cloud enumeration",
     },

@@ -215,6 +215,7 @@ class FindingRecord(BaseModel):
     conditions_required: str = ""
     safe_verification: str = ""
     prevention: str = ""
+    source: str = ""
 
 
 class ToolRunRecord(BaseModel):

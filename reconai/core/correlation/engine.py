@@ -11,6 +11,7 @@ Fixes applied:
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from reconai.core.database.manager import DatabaseManager
 
@@ -168,6 +169,8 @@ class CorrelationEngine:
                 "severity": str(f.get("severity", "")),
             })
 
+        cloud_assets = self.db.get_cloud_assets(self.scan_id)
+
         chains: list[dict[str, Any]] = []
         host_list = [str(s.get("subdomain")) for s in subs]
         if not host_list:
@@ -192,12 +195,37 @@ class CorrelationEngine:
                 if h_lower in asset_key or any(ip.lower() in asset_key for ip in associated_ips):
                     associated_findings.extend(f_list)
 
+            # Deduplicate findings per host
+            seen_finds = set()
+            unique_findings = []
+            for f in associated_findings:
+                f_key = (f.get("title", ""), f.get("severity", ""))
+                if f_key not in seen_finds:
+                    seen_finds.add(f_key)
+                    unique_findings.append(f)
+
+            # Correlate cloud assets linked by CNAME or domain naming
+            associated_clouds = []
+            for ca in cloud_assets:
+                meta = ca.get("metadata")
+                if isinstance(meta, str):
+                    try:
+                        meta = json.loads(meta)
+                    except Exception:
+                        meta = {}
+                cname_from = str((meta or {}).get("cname_from", "")).lower()
+                ca_name = str(ca.get("asset_name", "")).lower()
+                ca_url = str(ca.get("url", "")).lower()
+                if cname_from == h_lower or h_lower in ca_name or h_lower in ca_url:
+                    associated_clouds.append(f"[{ca.get('provider', '').upper()}] {ca.get('asset_name')} ({ca.get('asset_type')})")
+
             chains.append({
                 "host": host,
                 "ips": associated_ips,
                 "ports": associated_ports,
                 "technologies": associated_techs,
-                "findings": associated_findings,
+                "cloud_assets": list(dict.fromkeys(associated_clouds)),
+                "findings": unique_findings,
             })
 
         return chains

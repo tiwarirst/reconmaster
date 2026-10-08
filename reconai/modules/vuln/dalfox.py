@@ -47,22 +47,42 @@ class DalfoxModule(ReconModule):
         if not urls:
             return
 
+        # Deduplicate parameterized URLs by path + parameter signature
+        from urllib.parse import urlparse
+        deduped_urls: list[str] = []
+        seen_patterns: set[tuple[str, str, tuple[str, ...]]] = set()
+        for u in urls:
+            try:
+                parsed = urlparse(u)
+                params = tuple(sorted([p.split("=")[0] for p in parsed.query.split("&") if p]))
+                pattern_key = (parsed.netloc, parsed.path, params)
+                if pattern_key not in seen_patterns:
+                    seen_patterns.add(pattern_key)
+                    deduped_urls.append(u)
+            except Exception:
+                if u not in deduped_urls:
+                    deduped_urls.append(u)
+            if len(deduped_urls) >= 15:
+                break
+
+        test_urls = deduped_urls if deduped_urls else urls[:15]
+
         adapter = DalfoxAdapter(self.runner)
         has_dalfox = await adapter.is_available()
 
         start = time.monotonic()
-        self.logger.module_start(self.config.name, target=f"{len(urls)} parameterized URLs")
+        self.logger.module_start(self.config.name, target=f"{len(test_urls)} parameterized endpoint(s)")
 
         if has_dalfox:
             semaphore = asyncio.Semaphore(3)
-            tasks = [self._test_xss(adapter, semaphore, url) for url in urls]
+            tasks = [self._test_xss(adapter, semaphore, url) for url in test_urls]
             await asyncio.gather(*tasks, return_exceptions=True)
         else:
             self.record_warning(
                 "Dalfox not installed in PATH. Install: 'go install github.com/hahwul/dalfox/v2@latest' (or 'sudo apt install dalfox'). "
                 "Ran pure-Python XSS reflection probe fallback."
             )
-            await self._python_xss_probe(urls[:10])
+            await self._python_xss_probe(test_urls)
 
         duration = time.monotonic() - start
         self.logger.module_complete(self.config.name, duration=duration)

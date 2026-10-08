@@ -56,21 +56,27 @@ class NucleiAdapter(ToolAdapter):
             tags:        Optional additional template tags.
         """
         target: str = kwargs.get("target", "")
+        targets_file: Path | str = kwargs.get("targets_file", "") or kwargs.get("list_file", "")
         output_file: Path | str = kwargs.get("output_file", "")
         tags: str = kwargs.get("tags", "")
 
         cmd = [
             "nuclei",
-            "-u", target,
             "-jsonl",
             "-silent",
             "-no-color",
             "-tags", "cve,rce,sqli,xss,ssrf,ssti,lfi,idor,xxe,redirect,exposure,misconfig",
             "-severity", "critical,high,medium,low",
-            "-timeout", "30",
-            "-rate-limit", "50",
+            "-timeout", "15",
+            "-rate-limit", "100",
             "-retries", "1",
+            "-c", "25",
         ]
+
+        if targets_file:
+            cmd.extend(["-l", str(targets_file)])
+        elif target:
+            cmd.extend(["-u", target])
 
         if output_file:
             cmd.extend(["-o", str(output_file)])

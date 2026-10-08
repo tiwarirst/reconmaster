@@ -32,19 +32,25 @@ def _find_system_browser() -> str | None:
         "google-chrome-stable",
         "chrome",
         "msedge",
+        "firefox-esr",
+        "firefox",
         # Common Linux paths
         "/usr/bin/chromium",
         "/usr/bin/chromium-browser",
         "/usr/bin/google-chrome",
         "/usr/bin/google-chrome-stable",
+        "/usr/bin/firefox-esr",
+        "/usr/bin/firefox",
         # Common Windows paths
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Mozilla Firefox\firefox.exe",
         # Common macOS paths
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/Applications/Firefox.app/Contents/MacOS/firefox",
     ]
     for candidate in candidates:
         if shutil.which(candidate) or os.path.isfile(candidate):
@@ -175,24 +181,38 @@ class ScreenshotModule(ReconModule):
         self, browser_bin: str, urls: list[str], screenshot_dir: Path
     ) -> None:
         """Run headless browser directly via subprocess to capture PNGs."""
-        semaphore = asyncio.Semaphore(3)
+        semaphore = asyncio.Semaphore(5)
 
         async def _capture(url: str) -> None:
             safe_name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", url.replace("https://", "").replace("http://", ""))
             out_file = screenshot_dir / f"{safe_name}.png"
-            cmd = [
-                browser_bin,
-                "--headless",
-                "--disable-gpu",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                f"--screenshot={out_file}",
-                "--window-size=1280,800",
-                url,
-            ]
+            is_firefox = "firefox" in str(browser_bin).lower()
+            if is_firefox:
+                cmd = [
+                    browser_bin,
+                    "--headless",
+                    "--screenshot",
+                    str(out_file),
+                    "--window-size=1280,800",
+                    url,
+                ]
+            else:
+                cmd = [
+                    browser_bin,
+                    "--headless",
+                    "--disable-gpu",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--mute-audio",
+                    "--hide-scrollbars",
+                    "--virtual-time-budget=3000",
+                    f"--screenshot={out_file}",
+                    "--window-size=1280,800",
+                    url,
+                ]
             async with semaphore:
                 try:
-                    await self.runner.run(command=cmd, timeout=20)
+                    await self.runner.run(command=cmd, timeout=25)
                 except Exception as e:
                     self.logger.debug(f"Headless screenshot error for {url}: {e}", module=self.config.name)
 
@@ -202,16 +222,35 @@ class ScreenshotModule(ReconModule):
     async def _run_playwright(self, urls: list[str], screenshot_dir: Path) -> None:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(ignore_https_errors=True, viewport={"width": 1280, "height": 800})
-            for url in urls[:10]:
-                try:
-                    page = await context.new_page()
-                    await page.goto(url, timeout=12000, wait_until="load")
-                    safe_name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", url.replace("https://", "").replace("http://", ""))
-                    out_file = screenshot_dir / f"{safe_name}.png"
-                    await page.screenshot(path=str(out_file))
-                    await page.close()
-                except Exception:
-                    pass
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--mute-audio"],
+            )
+            context = await browser.new_context(
+                ignore_https_errors=True,
+                viewport={"width": 1280, "height": 800},
+            )
+            semaphore = asyncio.Semaphore(4)
+
+            async def _capture_pw(url: str) -> None:
+                async with semaphore:
+                    page = None
+                    try:
+                        page = await context.new_page()
+                        await page.goto(url, timeout=10000, wait_until="domcontentloaded")
+                        await asyncio.sleep(0.5)
+                        safe_name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", url.replace("https://", "").replace("http://", ""))
+                        out_file = screenshot_dir / f"{safe_name}.png"
+                        await page.screenshot(path=str(out_file))
+                    except Exception as e:
+                        self.logger.debug(f"Playwright screenshot error for {url}: {e}", module=self.config.name)
+                    finally:
+                        if page:
+                            try:
+                                await page.close()
+                            except Exception:
+                                pass
+
+            tasks = [_capture_pw(u) for u in urls[:12]]
+            await asyncio.gather(*tasks, return_exceptions=True)
             await browser.close()

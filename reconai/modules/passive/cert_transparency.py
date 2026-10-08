@@ -4,6 +4,7 @@ Queries crt.sh to find subdomains passively.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any
@@ -39,33 +40,41 @@ class CertTransparencyModule(ReconModule):
             start = time.monotonic()
             self.logger.module_start(self.config.name, target=domain)
 
-            subdomains = await self._query_crtsh(domain)
-            if not subdomains:
-                self.logger.info(f"crt.sh returned no results for {domain}; querying secondary passive sources...", module=self.config.name)
-                subdomains = await self._query_passive_fallbacks(domain)
+            crt_res, fall_res = await asyncio.gather(
+                self._query_crtsh(domain),
+                self._query_passive_fallbacks(domain),
+                return_exceptions=True,
+            )
+
+            subdomains: set[str] = set()
+            if isinstance(crt_res, set):
+                subdomains.update(crt_res)
+            if isinstance(fall_res, set):
+                subdomains.update(fall_res)
 
             # Ensure baseline domain and www are present if no subdomains found
             if not subdomains:
                 subdomains.add(domain)
                 subdomains.add(f"www.{domain}")
 
-            for sub in subdomains:
-                # Add to DB
-                record = SubdomainRecord(
+            records = [
+                SubdomainRecord(
                     scan_id=self.scan_id,
                     subdomain=sub,
                     domain=domain,
-                    sources=["crt.sh" if sub in subdomains else "passive_ct"]
+                    sources=["crt.sh" if isinstance(crt_res, set) and sub in crt_res else "passive_ct"],
                 )
-                self.db.insert_subdomain(record)
+                for sub in subdomains
+            ]
+            self.db.insert_subdomains_batch(records)
 
-                # Emit event
+            for sub in subdomains:
                 await self.events.emit_discovery(
                     event_type=EventType.SUBDOMAIN_DISCOVERED,
                     source=self.config.name,
                     data={"subdomain": sub, "domain": domain, "source": "ct_enum"},
                     scan_id=self.scan_id,
-                    target=self.target
+                    target=self.target,
                 )
 
             self.logger.info(f"Discovered {len(subdomains)} subdomains for {domain}", module=self.config.name)

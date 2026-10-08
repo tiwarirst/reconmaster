@@ -35,3 +35,27 @@ def test_wildcard_scope():
     scope = ScopeManager.for_target("*.example.com")
     assert scope.is_in_scope("api.example.com")
     assert not scope.is_in_scope("evil.com")
+
+
+def test_recon_module_scope_integration():
+    from unittest.mock import MagicMock
+    from reconai.modules.base import ReconModule, ModuleConfig
+
+    class DummyModule(ReconModule):
+        config = ModuleConfig(name="dummy", category="test", description="dummy")
+        async def run(self, **kwargs):
+            pass
+
+    mod = DummyModule(
+        db=MagicMock(),
+        events=MagicMock(),
+        logger=MagicMock(),
+        runner=MagicMock(),
+    )
+    # Without scope set -> permissive by default
+    assert mod.is_in_scope("sub.example.com")
+
+    # With scope set -> strictly enforces authorized target
+    mod.scope = ScopeManager.for_target("example.com")
+    assert mod.is_in_scope("sub.example.com")
+    assert not mod.is_in_scope("attacker.com")

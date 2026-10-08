@@ -54,12 +54,12 @@ class HTTPProbeModule(ReconModule):
         start = time.monotonic()
         self.logger.module_start(self.config.name, target=f"{len(hosts)} hosts")
 
-        semaphore = asyncio.Semaphore(20)
+        semaphore = asyncio.Semaphore(40)
 
         async with httpx.AsyncClient(
             verify=False, follow_redirects=False, timeout=10.0
         ) as client:
-            tasks = [self._probe_host(client, semaphore, host) for host in hosts[:150]]
+            tasks = [self._probe_host(client, semaphore, host) for host in hosts[:1000]]
             await asyncio.gather(*tasks, return_exceptions=True)
 
         duration = time.monotonic() - start

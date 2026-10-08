@@ -203,19 +203,9 @@ class DevArtifactsModule(ReconModule):
                         attack_class="Sensitive Data Exposure / Source Disclosure",
                         safe_verification=f"Perform a GET request to {target_url} to confirm the file is accessible.",
                         prevention="Implement strict web server access control rules denying hidden files and administrative paths.",
-                    )
-                    self.db.insert_finding(finding)
-                    await self.events.emit_discovery(
-                        event_type=EventType.FINDING_DISCOVERED,
                         source=self.config.name,
-                        data={
-                            "title": finding.title,
-                            "severity": finding.severity.value,
-                            "asset": finding.affected_asset,
-                        },
-                        scan_id=self.scan_id,
-                        target=self.target,
                     )
+                    await self.emit_finding(finding)
 
                 except Exception:
                     continue

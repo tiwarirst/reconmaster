@@ -40,18 +40,7 @@ class VulnIntelligenceModule(ReconModule):
         self.logger.module_complete(self.config.name, duration=duration)
 
     async def _emit_finding(self, finding: FindingRecord) -> None:
-        self.db.insert_finding(finding)
-        await self.events.emit_discovery(
-            event_type=EventType.FINDING_DISCOVERED,
-            source=self.config.name,
-            data={
-                "title": finding.title,
-                "severity": finding.severity.value,
-                "asset": finding.affected_asset,
-            },
-            scan_id=self.scan_id,
-            target=self.target,
-        )
+        await self.emit_finding(finding)
 
     async def _analyze_security_headers(self) -> None:
         """Analyze URLs for missing security headers."""
