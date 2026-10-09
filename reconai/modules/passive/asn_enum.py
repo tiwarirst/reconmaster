@@ -39,7 +39,7 @@ class ASNEnumModule(ReconModule):
         super().__init__(*args, **kwargs)
         self.asn_data: list[dict[str, Any]] = []
 
-    async def run(self) -> None:
+    async def run(self, **kwargs: Any) -> Any:
         """Run ASN & BGP prefix discovery."""
         self.logger.info(f"Starting autonomous ASN & BGP prefix discovery for target: {self.target}", module=self.config.name)
 

@@ -34,7 +34,7 @@ class OSINTFusionModule(ReconModule):
         supports_streaming=True,
     )
 
-    async def run(self) -> None:
+    async def run(self, **kwargs: Any) -> Any:
         """Run passive OSINT fusion against discovered IP addresses."""
         self.logger.info(f"Starting passive OSINT fusion for target: {self.target}", module=self.config.name)
 

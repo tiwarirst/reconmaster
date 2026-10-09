@@ -5,6 +5,7 @@ Uses Click to provide a professional, structured command-line interface.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import sys
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import Any
 import click
 
 from reconai.core.config.manager import ConfigManager
+from reconai.core.database.manager import DatabaseManager
 from reconai.core.orchestrator import Orchestrator
 from reconai.core.scope.manager import ScopeManager
 from reconai.reports.generator import ReportGenerator
@@ -354,17 +356,23 @@ def ai(ctx: click.Context, target_or_scan_id: str, ai_url: str | None, ai_model:
     base_out = Path(config_mgr.config.output.base_dir)
 
     # Check if target_or_scan_id is an existing scan directory
-    scan_dir = None
-    for path in base_out.rglob(target_or_scan_id):
-        if path.is_dir():
-            scan_dir = path
-            break
+    scan_dir = DatabaseManager.find_scan_dir(target_or_scan_id, base_out)
 
-    effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
-    effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
+    effective_ai_url = (
+        ai_url
+        or os.getenv("OLLAMA_BASE_URL")
+        or os.getenv("OLLAMA_HOST")
+        or getattr(getattr(config_mgr.config, "ai", None), "url", None)
+        or "http://localhost:11434"
+    )
+    effective_ai_model = (
+        ai_model
+        or os.getenv("OLLAMA_MODEL")
+        or getattr(getattr(config_mgr.config, "ai", None), "model", None)
+        or "llama3"
+    )
 
     if scan_dir:
-        from reconai.core.database.manager import DatabaseManager
         from reconai.ai.local import OllamaAdapter
         from reconai.ai.analyzer import Analyzer
         db = DatabaseManager(db_path=scan_dir / "reconai.db")
@@ -418,18 +426,12 @@ def report(ctx: click.Context, scan_id: str, out: str | None) -> None:
     config_mgr: ConfigManager = ctx.obj["config_mgr"]
     
     base_out = Path(config_mgr.config.output.base_dir)
-    # Search for scan_id in all target dirs (crude but works for now)
-    scan_dir = None
-    for path in base_out.rglob(scan_id):
-        if path.is_dir():
-            scan_dir = path
-            break
+    scan_dir = DatabaseManager.find_scan_dir(scan_id, base_out)
             
     if not scan_dir:
         console.error(f"Scan ID {scan_id} not found in {base_out}")
         sys.exit(1)
         
-    from reconai.core.database.manager import DatabaseManager
     db = DatabaseManager(db_path=scan_dir / "reconai.db")
     
     try:
@@ -502,10 +504,8 @@ def compare(ctx: click.Context, old_scan_id: str, new_scan_id: str) -> None:
     
     # Locate scan DBs
     def find_db(scan_id: str) -> Path | None:
-        for path in base_out.rglob(scan_id):
-            if path.is_dir():
-                return path / "reconai.db"
-        return None
+        sd = DatabaseManager.find_scan_dir(scan_id, base_out)
+        return (sd / "reconai.db") if sd else None
 
     old_db_path = find_db(old_scan_id)
     new_db_path = find_db(new_scan_id)
@@ -514,7 +514,6 @@ def compare(ctx: click.Context, old_scan_id: str, new_scan_id: str) -> None:
         console.error("Could not locate database for one or both scans.")
         sys.exit(1)
 
-    from reconai.core.database.manager import DatabaseManager
     from reconai.core.changes.detector import ChangeDetector
     
     # We use the new db manager for the detector, but we need both paths.
@@ -573,17 +572,12 @@ def exploit(ctx: click.Context, scan_id: str, finding_title: str, ai_url: str | 
     config_mgr: ConfigManager = ctx.obj["config_mgr"]
     
     base_out = Path(config_mgr.config.output.base_dir)
-    scan_dir = None
-    for path in base_out.rglob(scan_id):
-        if path.is_dir():
-            scan_dir = path
-            break
+    scan_dir = DatabaseManager.find_scan_dir(scan_id, base_out)
             
     if not scan_dir:
         console.error(f"Scan ID {scan_id} not found.")
         sys.exit(1)
         
-    from reconai.core.database.manager import DatabaseManager
     db = DatabaseManager(db_path=scan_dir / "reconai.db")
     try:
         findings = db.get_findings(scan_id)
@@ -635,24 +629,13 @@ def report(ctx: click.Context, scan_path_or_id: str, ai: bool, ai_url: str | Non
     config_mgr: ConfigManager = ctx.obj["config_mgr"]
 
     # 1. Locate the scan directory and database
-    cand = Path(scan_path_or_id)
-    scan_dir: Path | None = None
-    if cand.is_dir() and (cand / "reconai.db").exists():
-        scan_dir = cand.resolve()
-    else:
-        # Search base output dir
-        base_out = Path(config_mgr.config.output.base_dir)
-        for p in base_out.rglob(scan_path_or_id):
-            if p.is_dir() and (p / "reconai.db").exists():
-                scan_dir = p.resolve()
-                break
+    scan_dir = DatabaseManager.find_scan_dir(scan_path_or_id, Path(config_mgr.config.output.base_dir))
 
     if not scan_dir:
         console.error(f"Scan directory with 'reconai.db' not found for: {scan_path_or_id}")
         sys.exit(1)
 
     db_path = scan_dir / "reconai.db"
-    from reconai.core.database.manager import DatabaseManager
     db = DatabaseManager(db_path=db_path)
     try:
         # Resolve scan metadata from db or directory structure
@@ -759,22 +742,12 @@ def agent(ctx: click.Context, scan_path_or_id: str, ai_url: str | None, ai_model
     config_mgr: ConfigManager = ctx.obj["config_mgr"]
 
     # 1. Locate scan directory and database
-    cand = Path(scan_path_or_id)
-    scan_dir = None
-    if cand.is_dir() and (cand / "reconai.db").exists():
-        scan_dir = cand.resolve()
-    else:
-        base_out = Path(config_mgr.config.output.base_dir)
-        for p in base_out.rglob(scan_path_or_id):
-            if p.is_dir() and (p / "reconai.db").exists():
-                scan_dir = p.resolve()
-                break
+    scan_dir = DatabaseManager.find_scan_dir(scan_path_or_id, Path(config_mgr.config.output.base_dir))
 
     if not scan_dir:
         console.error(f"Scan directory with 'reconai.db' not found for: {scan_path_or_id}")
         sys.exit(1)
 
-    from reconai.core.database.manager import DatabaseManager
     from reconai.ai.local import OllamaAdapter
     from reconai.ai.agent import RedTeamAgent
 
@@ -825,22 +798,12 @@ def verify(ctx: click.Context, scan_path_or_id: str, ai_url: str | None, ai_mode
     console: ReconConsole = ctx.obj["console"]
     config_mgr: ConfigManager = ctx.obj["config_mgr"]
 
-    cand = Path(scan_path_or_id)
-    scan_dir = None
-    if cand.is_dir() and (cand / "reconai.db").exists():
-        scan_dir = cand.resolve()
-    else:
-        base_out = Path(config_mgr.config.output.base_dir)
-        for p in base_out.rglob(scan_path_or_id):
-            if p.is_dir() and (p / "reconai.db").exists():
-                scan_dir = p.resolve()
-                break
+    scan_dir = DatabaseManager.find_scan_dir(scan_path_or_id, Path(config_mgr.config.output.base_dir))
 
     if not scan_dir:
         console.error(f"Scan directory with 'reconai.db' not found for: {scan_path_or_id}")
         sys.exit(1)
 
-    from reconai.core.database.manager import DatabaseManager
     from reconai.ai.local import OllamaAdapter
     from reconai.ai.verifier import ClosedLoopVerifier
 
@@ -894,22 +857,12 @@ def threat_profile(ctx: click.Context, scan_path_or_id: str, ai_url: str | None,
     console: ReconConsole = ctx.obj["console"]
     config_mgr: ConfigManager = ctx.obj["config_mgr"]
 
-    cand = Path(scan_path_or_id)
-    scan_dir = None
-    if cand.is_dir() and (cand / "reconai.db").exists():
-        scan_dir = cand.resolve()
-    else:
-        base_out = Path(config_mgr.config.output.base_dir)
-        for p in base_out.rglob(scan_path_or_id):
-            if p.is_dir() and (p / "reconai.db").exists():
-                scan_dir = p.resolve()
-                break
+    scan_dir = DatabaseManager.find_scan_dir(scan_path_or_id, Path(config_mgr.config.output.base_dir))
 
     if not scan_dir:
         console.error(f"Scan directory with 'reconai.db' not found for: {scan_path_or_id}")
         sys.exit(1)
 
-    from reconai.core.database.manager import DatabaseManager
     from reconai.ai.local import OllamaAdapter
     from reconai.ai.threat_profiler import ThreatActorProfiler
 
@@ -953,22 +906,12 @@ def prioritize(ctx: click.Context, scan_path_or_id: str, limit: int) -> None:
     console: ReconConsole = ctx.obj["console"]
     config_mgr: ConfigManager = ctx.obj["config_mgr"]
 
-    cand = Path(scan_path_or_id)
-    scan_dir = None
-    if cand.is_dir() and (cand / "reconai.db").exists():
-        scan_dir = cand.resolve()
-    else:
-        base_out = Path(config_mgr.config.output.base_dir)
-        for p in base_out.rglob(scan_path_or_id):
-            if p.is_dir() and (p / "reconai.db").exists():
-                scan_dir = p.resolve()
-                break
+    scan_dir = DatabaseManager.find_scan_dir(scan_path_or_id, Path(config_mgr.config.output.base_dir))
 
     if not scan_dir:
         console.error(f"Scan directory with 'reconai.db' not found for: {scan_path_or_id}")
         sys.exit(1)
 
-    from reconai.core.database.manager import DatabaseManager
     from reconai.ai.fuzz_optimizer import AttackSurfacePrioritizer
 
     db = DatabaseManager(db_path=scan_dir / "reconai.db")
@@ -1010,22 +953,12 @@ def waf_advisor(ctx: click.Context, scan_path_or_id: str, ai_url: str | None, ai
     console: ReconConsole = ctx.obj["console"]
     config_mgr: ConfigManager = ctx.obj["config_mgr"]
 
-    cand = Path(scan_path_or_id)
-    scan_dir = None
-    if cand.is_dir() and (cand / "reconai.db").exists():
-        scan_dir = cand.resolve()
-    else:
-        base_out = Path(config_mgr.config.output.base_dir)
-        for p in base_out.rglob(scan_path_or_id):
-            if p.is_dir() and (p / "reconai.db").exists():
-                scan_dir = p.resolve()
-                break
+    scan_dir = DatabaseManager.find_scan_dir(scan_path_or_id, Path(config_mgr.config.output.base_dir))
 
     if not scan_dir:
         console.error(f"Scan directory with 'reconai.db' not found for: {scan_path_or_id}")
         sys.exit(1)
 
-    from reconai.core.database.manager import DatabaseManager
     from reconai.ai.local import OllamaAdapter
     from reconai.ai.defensive_advisor import DefensiveAdvisor
 
@@ -1070,22 +1003,12 @@ def chat(ctx: click.Context, scan_path_or_id: str, ai_url: str | None, ai_model:
     console: ReconConsole = ctx.obj["console"]
     config_mgr: ConfigManager = ctx.obj["config_mgr"]
 
-    cand = Path(scan_path_or_id)
-    scan_dir = None
-    if cand.is_dir() and (cand / "reconai.db").exists():
-        scan_dir = cand.resolve()
-    else:
-        base_out = Path(config_mgr.config.output.base_dir)
-        for p in base_out.rglob(scan_path_or_id):
-            if p.is_dir() and (p / "reconai.db").exists():
-                scan_dir = p.resolve()
-                break
+    scan_dir = DatabaseManager.find_scan_dir(scan_path_or_id, Path(config_mgr.config.output.base_dir))
 
     if not scan_dir:
         console.error(f"Scan directory with 'reconai.db' not found for: {scan_path_or_id}")
         sys.exit(1)
 
-    from reconai.core.database.manager import DatabaseManager
     from reconai.ai.local import OllamaAdapter
     from reconai.ai.copilot import ReconCopilot
 

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from reconai.core.database.models import CloudAssetRecord
+from reconai.core.executor.command_runner import CommandRunner
 from reconai.core.executor.result import CommandResult
 from reconai.integrations.base import ToolAdapter
 

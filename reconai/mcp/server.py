@@ -152,13 +152,12 @@ def _resolve_db(scan_path_or_id: str) -> tuple[DatabaseManager | None, str]:
     # Search in default output directory
     from reconai.core.config.manager import ConfigManager
     cfg = ConfigManager()
-    base_out = Path(cfg.config.output.base_dir)
-    for cand in base_out.rglob(scan_path_or_id):
-        if cand.is_dir() and (cand / "reconai.db").exists():
-            db = DatabaseManager(db_path=cand / "reconai.db")
-            scans = db.list_scans(limit=1)
-            scan_id = scans[0]["id"] if scans else cand.name
-            return db, scan_id
+    cand = DatabaseManager.find_scan_dir(scan_path_or_id, Path(cfg.config.output.base_dir))
+    if cand and (cand / "reconai.db").exists():
+        db = DatabaseManager(db_path=cand / "reconai.db")
+        scans = db.list_scans(limit=1)
+        scan_id = scans[0]["id"] if scans else cand.name
+        return db, scan_id
 
     return None, ""
 

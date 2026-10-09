@@ -213,6 +213,8 @@ class CommandRunner:
 
                 except asyncio.TimeoutError:
                     # ── Timeout handling ─────────────────────
+                    stdout_task.cancel()
+                    stderr_task.cancel()
                     duration = time.monotonic() - start_time
 
                     # Capture partial output before killing
@@ -249,6 +251,15 @@ class CommandRunner:
                         self._process_mgr.unregister(process.pid)
 
         except asyncio.CancelledError:
+            try:
+                if "stdout_task" in locals():
+                    stdout_task.cancel()
+                if "stderr_task" in locals():
+                    stderr_task.cancel()
+                if "process" in locals():
+                    await self._process_mgr.kill_process(process)
+            except Exception:
+                pass
             return CommandResult(
                 command=command,
                 status=CommandStatus.CANCELLED,

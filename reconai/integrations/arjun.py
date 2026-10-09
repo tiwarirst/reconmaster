@@ -32,6 +32,8 @@ class ArjunAdapter(ToolAdapter):
             "-m", method,
             "-oJ", str(output_file),
             "-t", str(threads),
+            "-T", "5",
+            "--disable-redirects",
             "--passive",
         ]
         return cmd

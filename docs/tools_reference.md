@@ -156,7 +156,7 @@ Each integration follows the **stateless adapter pattern** ([reconai/integration
 - **Flags Used**: `--hide_fails --concurrency 15`
 - **Config Key**: `tools.subzy` (threads, timeout, extra_args)
 - **Pure-Python Fallback**: CNAME response inspector matching dangling AWS S3, GitHub Pages, Heroku, etc.
-- **Install**: `go install -v github.com/pentest-io/subzy@latest`
+- **Install**: `go install -v github.com/PentestPad/subzy@latest`
 
 #### `gitleaks`
 - **Role**: Ultra-fast secret detection using regex rules.

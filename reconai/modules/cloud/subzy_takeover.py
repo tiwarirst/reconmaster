@@ -85,7 +85,7 @@ class SubzyTakeoverModule(ReconModule):
                 output_file.unlink(missing_ok=True)
         else:
             self.record_warning(
-                "Subzy not installed in PATH. Install: 'go install -v github.com/pentest-io/subzy@latest'. "
+                "Subzy not installed in PATH. Install: 'go install -v github.com/PentestPad/subzy@latest'. "
                 "Ran pure-Python CNAME dangling DNS fingerprint fallback."
             )
             await self._python_takeover_check(subdomains[:100])

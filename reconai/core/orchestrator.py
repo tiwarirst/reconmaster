@@ -55,7 +55,7 @@ TOOL_INSTALL_GUIDES: dict[str, str] = {
     "boto3": "pip install boto3",
     "playwright": "pip install playwright && playwright install chromium",
     "arjun": "pip install arjun  (or sudo apt install arjun)",
-    "subzy": "go install -v github.com/pentest-io/subzy@latest",
+    "subzy": "go install -v github.com/PentestPad/subzy@latest",
     "gitleaks": "brew install gitleaks  (or go install github.com/zricethezav/gitleaks/v8@latest)",
     "tlsx": "go install -v github.com/projectdiscovery/tlsx/cmd/tlsx@latest",
     "gau": "go install github.com/lc/gau/v2/cmd/gau@latest",
@@ -175,10 +175,16 @@ class Orchestrator:
             return timeout_override
 
         cfg_timeouts = getattr(self.config.config, "timeouts", {})
-        if isinstance(cfg_timeouts, dict):
-            val = cfg_timeouts.get(name) or cfg_timeouts.get(f"{name}_tool")
-            if val:
-                return val
+        if hasattr(cfg_timeouts, "model_dump"):
+            cfg_dict = cfg_timeouts.model_dump()
+        elif isinstance(cfg_timeouts, dict):
+            cfg_dict = cfg_timeouts
+        else:
+            cfg_dict = {}
+
+        val = cfg_dict.get(name) or cfg_dict.get(f"{name}_tool")
+        if val:
+            return int(val)
 
         # Deep mode gets 2x timeout multiplier so heavy active scanners do not get cut off
         deep_mult = 2 if mode == "deep" else 1
@@ -199,10 +205,10 @@ class Orchestrator:
             return 120 * deep_mult
         elif name in ("paramspider", "archive_urls"):
             return 90 * deep_mult
+        elif name in ("arjun_params", "arjun"):
+            return 45 * deep_mult
 
-        default_timeout = 60
-        if isinstance(cfg_timeouts, dict):
-            default_timeout = cfg_timeouts.get("default", 60)
+        default_timeout = int(cfg_dict.get("default", 60))
         return default_timeout * deep_mult
 
     async def run(self) -> None:

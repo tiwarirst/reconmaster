@@ -836,3 +836,47 @@ class DatabaseManager:
             "ips":          self.get_ips(scan_id),
             "cloud_assets": self.get_cloud_assets(scan_id),
         }
+
+    @staticmethod
+    def find_scan_dir(identifier: str, base_out: Path | str = "output") -> Path | None:
+        """Locate a scan directory by direct path, scan_id, or target domain.
+
+        Handles:
+          - Direct directory paths (relative or absolute) containing reconai.db
+          - Target domain names (resolves to the newest scan under output/<target>)
+          - Scan IDs (walks base_out to find matching directory containing reconai.db)
+        """
+        import os
+        try:
+            cand = Path(identifier)
+            if cand.is_dir() and (cand / "reconai.db").is_file():
+                return cand
+        except Exception:
+            pass
+
+        base_p = Path(base_out)
+        if not base_p.exists():
+            return None
+
+        # Check if identifier is a target directory (e.g. output/darshan.ac.in)
+        target_dir = base_p / identifier
+        if target_dir.is_dir():
+            if (target_dir / "reconai.db").is_file():
+                return target_dir
+            subdirs = sorted(
+                [d for d in target_dir.iterdir() if d.is_dir() and (d / "reconai.db").is_file()],
+                key=lambda d: d.name,
+                reverse=True,
+            )
+            if subdirs:
+                return subdirs[0]
+
+        # Walk base_out to locate matching directory name
+        for root, dirs, _ in os.walk(base_p):
+            for d in dirs:
+                if d == identifier:
+                    found = Path(root) / d
+                    if (found / "reconai.db").is_file():
+                        return found
+
+        return None
