@@ -6,6 +6,8 @@ Translates JSON-lines output from httpx CLI into URLRecord and TechnologyRecord 
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +19,27 @@ from reconai.integrations.base import ToolAdapter
 class HttpxAdapter(ToolAdapter):
     name = "httpx"
 
+    @classmethod
+    def get_binary(cls) -> str:
+        """Resolve the ProjectDiscovery httpx binary, preferring httpx-toolkit or system binary.
+
+        Avoids invoking python's virtualenv httpx console script.
+        """
+        if shutil.which("httpx-toolkit"):
+            return "httpx-toolkit"
+        path = shutil.which("httpx")
+        if path and (".venv" in path or "site-packages" in path):
+            filtered = os.pathsep.join(
+                p for p in os.environ.get("PATH", "").split(os.pathsep) if ".venv" not in p
+            )
+            external = shutil.which("httpx", path=filtered)
+            if external:
+                return external
+        return "httpx"
+
     async def is_available(self) -> bool:
-        avail, _ = await self.runner.check_tool(self.name)
+        binary = self.get_binary()
+        avail, _ = await self.runner.check_tool(binary)
         return avail
 
     def build_command(self, **kwargs: Any) -> list[str]:
@@ -26,9 +47,10 @@ class HttpxAdapter(ToolAdapter):
         targets_file: Path | None = kwargs.get("targets_file")
         output_file: Path = kwargs["output_file"]
         threads: int = kwargs.get("threads", 50)
+        binary = self.get_binary()
 
         cmd = [
-            "httpx",
+            binary,
             "-silent",
             "-json",
             "-o", str(output_file),
@@ -95,7 +117,7 @@ class HttpxAdapter(ToolAdapter):
                                 host=host,
                                 name=tech_name,
                                 category="web",
-                                confidence="high",
+                                confidence=0.9,  # BUG-009 FIX: TechnologyRecord.confidence is typed float; string "high" causes ValidationError in Pydantic v2
                                 source="httpx_cli",
                                 evidence={"url": raw_url, "status": status},
                             ))
@@ -108,4 +130,7 @@ class HttpxAdapter(ToolAdapter):
         return urls, techs
 
     def parse(self, result: CommandResult) -> list[URLRecord]:
+        # BUG-029 FIX: delegate to parse_output_file() which contains the actual parsing logic
+        if result.output_file:
+            return self.parse_output_file(result.output_file)
         return []

@@ -169,6 +169,9 @@ class SecretsModule(ReconModule):
             response = await client.get(url)
             if response.status_code == 200:
                 safe_name = url.replace("https://", "").replace("http://", "").replace("/", "_").replace(":", "_")
+                # BUG-010 FIX: URLs with long paths/query strings can exceed 255-byte filename limit; truncate + hash suffix for uniqueness
+                if len(safe_name) > 200:
+                    safe_name = safe_name[:180] + "_" + format(hash(url) & 0xFFFFFFFF, "08x")
                 file_path = target_dir / safe_name
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(response.text)

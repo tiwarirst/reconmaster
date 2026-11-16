@@ -202,6 +202,13 @@ class MetadataSSRFModule(ReconModule):
         url: str,
     ) -> None:
         """Test a URL's parameters for SSRF → Cloud Metadata access."""
+        # BUG-017 FIX: Enforce scope check before firing any active SSRF probes.
+        # SSRF probes are active testing — out-of-scope hosts must never be touched.
+        if hasattr(self, "scope") and self.scope is not None and hasattr(self.scope, "is_allowed"):
+            _host = urlparse(url).netloc.split(":")[0]
+            if _host and not self.scope.is_allowed(_host):
+                self.logger.debug("[metadata_ssrf] Skipping %s — host is out of scope", _host)
+                return
         parsed = urlparse(url)
         if not parsed.query:
             return

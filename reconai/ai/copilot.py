@@ -104,6 +104,7 @@ class ReconCopilot:
         self.history.append({"role": "user", "content": q})
 
         # If LLM is available, invoke multi-turn chat
+        _llm_error: str = ""
         if self.ai and await self.ai.is_available():
             try:
                 response = await self.ai.chat(self.history)
@@ -111,10 +112,10 @@ class ReconCopilot:
                     self.history.append({"role": "assistant", "content": response})
                     return response
             except Exception as exc:
-                pass
+                _llm_error = str(exc)
 
         # Offline fallback handler
-        return self._offline_response(q)
+        return self._offline_response(q, llm_error=_llm_error)
 
     def _quick_summary(self) -> str:
         return (
@@ -159,8 +160,8 @@ class ReconCopilot:
             "  * *'Give me the exact curl command to test the CORS finding.'*"
         )
 
-    def _offline_response(self, query: str) -> str:
-        """Deterministic response engine when LLM is offline."""
+    def _offline_response(self, query: str, llm_error: str = "") -> str:
+        """Deterministic response engine when LLM is offline or errored."""
         q_lower = query.lower()
 
         # Check if user asked about a specific finding index (e.g. "finding 1", "#2", "first finding")
@@ -193,10 +194,11 @@ class ReconCopilot:
                 "- **Recommended Action:** Use `reconai exploit <scan_id> <finding_title>` to inspect tailored PoC verification scripts."
             )
 
+        error_note = f"\n\n> ⚠️ **LLM Error:** `{llm_error}`" if llm_error else ""
         return (
             f"**ReconAI Copilot Grounded Response:**\n\n"
             f"I have reviewed `{self.target}` with {len(self.findings)} findings and {len(self.subdomains)} subdomains. "
             f"To get in-depth conversational answers to '{query}', connect to Ollama via:\n"
             f"`reconai chat <scan_id> --ai-url http://<GPU_IP>:11434 --ai-model <model_name>`\n\n"
-            f"In offline mode, try typing `/summary`, `/findings`, or `/paths`."
+            f"In offline mode, try typing `/summary`, `/findings`, or `/paths`.{error_note}"
         )

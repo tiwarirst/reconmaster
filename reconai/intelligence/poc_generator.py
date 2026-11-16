@@ -38,57 +38,111 @@ class PoCGenerator:
     target URL and parameter from the finding.
     """
 
-    # ── Template dispatch: attack_class -> generator method ─────────────────
-    _DISPATCH: dict[str, str] = {
-        "xss":               "_gen_xss",
-        "cross-site scripting": "_gen_xss",
-        "sqli":              "_gen_sqli",
-        "sql injection":     "_gen_sqli",
-        "ssrf":              "_gen_ssrf",
-        "server-side request forgery": "_gen_ssrf",
-        "idor":              "_gen_idor",
-        "insecure direct object reference": "_gen_idor",
-        "ssti":              "_gen_ssti",
-        "server-side template injection": "_gen_ssti",
-        "lfi":               "_gen_lfi",
-        "local file inclusion": "_gen_lfi",
-        "rce":               "_gen_rce",
-        "remote code execution": "_gen_rce",
-        "open redirect":     "_gen_open_redirect",
-        "xxe":               "_gen_xxe",
-        "xml external entity": "_gen_xxe",
-        "crlf injection":    "_gen_crlf",
-        "secret":            "_gen_secret_verify",
-        "exposed":           "_gen_exposed_endpoint",
-        "subdomain takeover": "_gen_subdomain_takeover",
-        "default":           "_gen_generic",
-    }
+    # ── Template dispatch: attack_class / title keyword → generator method ─────
+    # Ordered from most specific to most generic so the first match wins.
+    # Values come from ALL attack_class strings set across the entire codebase.
+    _DISPATCH: list[tuple[list[str], str]] = [
+        # XSS
+        (["xss", "cross-site scripting", "cross site scripting"], "_gen_xss"),
+        # SQL Injection
+        (["sqli", "sql injection", "sql-injection", "sql"], "_gen_sqli"),
+        # SSRF  ← was the primary failure: long strings like
+        # "Server-Side Request Forgery (SSRF) → Cloud Credential Theft" never matched "ssrf"
+        (["ssrf", "server-side request forgery", "server side request forgery",
+          "cloud credential theft", "imds", "metadata"], "_gen_ssrf"),
+        # SSTI
+        (["ssti", "server-side template injection", "server side template injection",
+          "template injection"], "_gen_ssti"),
+        # LFI / Path Traversal
+        (["lfi", "local file inclusion", "path traversal", "directory traversal",
+          "file inclusion"], "_gen_lfi"),
+        # RCE / Command Injection
+        (["rce", "remote code execution", "command injection", "cmdi",
+          "code execution", "os injection"], "_gen_rce"),
+        # IDOR
+        (["idor", "insecure direct object reference", "object reference",
+          "broken access control", "authorization bypass"], "_gen_idor"),
+        # Open Redirect
+        (["open redirect", "unvalidated redirect", "redirect"], "_gen_open_redirect"),
+        # XXE
+        (["xxe", "xml external entity", "xml injection"], "_gen_xxe"),
+        # CRLF
+        (["crlf", "header injection", "response splitting"], "_gen_crlf"),
+        # Secrets / Credentials / Key Exposure
+        (["secret", "credential", "api key", "token exposure", "password exposure",
+          "key exposure", "sensitive data", "gitleaks", "trufflehog",
+          "cloud credential", "credential exposure", "iam"], "_gen_secret_verify"),
+        # Exposed endpoints / files / info disclosure
+        (["exposed", "exposure", "disclosure", "information disclosure",
+          "source disclosure", "dev artifact", "backup", "env file",
+          "git exposure", "directory listing", "sensitive file",
+          "misconfig", "misconfiguration", "security misconfiguration",
+          "man-in-the-middle", "mitm", "downgrade",
+          "email spoofing", "spoofing", "phishing",
+          "api surface", "api exposure", "api information"], "_gen_exposed_endpoint"),
+        # Subdomain Takeover
+        (["subdomain takeover", "subdomain hijack", "takeover", "dangling cname",
+          "dangling dns"], "_gen_subdomain_takeover"),
+    ]
 
     def generate(self, finding: dict, cve_data: dict | None = None) -> PoC:
-        """Generate a PoC for the given finding dict."""
-        attack_class = (finding.get("attack_class") or finding.get("title") or "").lower()
+        """Generate a unique, targeted PoC for this specific finding.
+
+        Resolution order:
+        1. finding["attack_class"]  (canonical — set by each scanner module)
+        2. finding["title"]         (human-readable fallback)
+        3. finding["why_detected"] (description fallback)
+        4. _gen_generic             (last resort — never the first choice)
+        """
+        # Collect all text signals from the finding, lowercased
+        attack_class = str(finding.get("attack_class") or "").lower().strip()
+        title = str(finding.get("title") or "").lower().strip()
+        why = str(finding.get("why_detected") or "").lower().strip()
+
+        # Build a combined search string from most-specific to least-specific
+        search_tokens = [attack_class, title, why]
+        combined = " | ".join(t for t in search_tokens if t)
+
+        # Normalise the raw target URL
         raw_target = str(finding.get("affected_asset") or "https://target.example.com/")
-        if "subdomain takeover" in attack_class:
-            target = raw_target
-        elif not raw_target.startswith("http://") and not raw_target.startswith("https://"):
-            target = f"https://{raw_target}"
-        else:
-            target = raw_target
-        title = finding.get("title", "Unknown Vulnerability")
+        if not raw_target.startswith(("http://", "https://")):
+            raw_target = f"https://{raw_target}"
+        target = raw_target
+        title_display = finding.get("title", "Unknown Vulnerability")
 
-        # Find best matching template
-        generator_method = "_gen_generic"
-        for key, method in self._DISPATCH.items():
-            if key in attack_class:
-                generator_method = method
-                break
-
+        generator_method = self._resolve_generator(combined)
         gen_fn: Callable[..., PoC] = getattr(self, generator_method, self._gen_generic)
         try:
-            poc: PoC = gen_fn(title, target, finding, cve_data or {})
+            poc: PoC = gen_fn(title_display, target, finding, cve_data or {})
         except Exception:
-            poc = self._gen_generic(title, target, finding, cve_data or {})
+            poc = self._gen_generic(title_display, target, finding, cve_data or {})
         return poc
+
+    # Short abbreviation keywords that need word-boundary matching to prevent
+    # false positives (e.g. 'rce' inside 'source', 'sql' inside 'disclose').
+    _ABBREV_KEYWORDS: frozenset[str] = frozenset([
+        "xss", "sqli", "ssrf", "ssti", "lfi", "rce", "idor", "xxe", "crlf", "iam",
+    ])
+
+    def _resolve_generator(self, combined_text: str) -> str:
+        """Find the best-matching generator for this combined finding text.
+
+        Short abbreviation keywords (xss, sqli, rce, lfi, etc.) are matched
+        with word boundaries to prevent false positives like 'rce' inside
+        'source disclosure'. Longer descriptive phrases use plain substring
+        matching which is safe because they're specific enough.
+        """
+        import re
+        for keywords, method in self._DISPATCH:
+            for kw in keywords:
+                if kw in self._ABBREV_KEYWORDS:
+                    # Word-boundary match: \brce\b won't match inside 'source'
+                    if re.search(r'\b' + re.escape(kw) + r'\b', combined_text):
+                        return method
+                else:
+                    if kw in combined_text:
+                        return method
+        return "_gen_generic"
 
     # ═══════════════════════════════════════════════════════════════════════
     # XSS

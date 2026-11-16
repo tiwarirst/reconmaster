@@ -51,12 +51,16 @@ class ClosedLoopVerifier:
                     updated_evidence = f"{existing_evidence}\n[AI Verifier]: {evidence_note}".strip()
                     fid = finding.get("id")
                     if fid:
-                        with self.db._lock:
-                            self.db.conn.execute(
-                                "UPDATE findings SET confidence = ?, verified = ?, evidence = ? WHERE id = ?",
-                                (new_conf, is_ver, updated_evidence, fid),
-                            )
-                            self.db.conn.commit()
+                        # Use public API if available; fall back to internal lock-guarded conn
+                        if hasattr(self.db, "update_finding_verification"):
+                            self.db.update_finding_verification(fid, new_conf, is_ver, updated_evidence)
+                        else:
+                            with self.db._lock:
+                                self.db.conn.execute(
+                                    "UPDATE findings SET confidence = ?, verified = ?, evidence = ? WHERE id = ?",
+                                    (new_conf, is_ver, updated_evidence, fid),
+                                )
+                                self.db.conn.commit()
                 except Exception:
                     pass
 

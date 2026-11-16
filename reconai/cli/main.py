@@ -86,6 +86,42 @@ def cli(ctx: click.Context, debug: bool, verbose: bool, config: str | None) -> N
     ctx.obj["console"] = console
     ctx.obj["config_mgr"] = config_mgr
 
+def _resolve_ai_config(
+    config_mgr: "ConfigManager",
+    ai_url: str | None = None,
+    ai_model: str | None = None,
+) -> tuple[str, str]:
+    """Centralised AI URL + model resolution with full priority chain.
+
+    Priority (highest → lowest):
+      1. Explicit CLI --ai-url / --ai-model flag
+      2. OLLAMA_BASE_URL / OLLAMA_HOST / OLLAMA_MODEL env vars
+      3. config.yaml  ai.url / ai.model
+      4. Hardcoded safe defaults (localhost:11434 / llama3)
+
+    This ensures that changing config.yaml ai.url to a remote GPU address
+    works correctly for every command without additional flags.
+    """
+    ai_cfg = getattr(config_mgr.config, "ai", None)
+    cfg_url = getattr(ai_cfg, "url", None) or ""
+    cfg_model = getattr(ai_cfg, "model", None) or ""
+
+    resolved_url = (
+        ai_url
+        or os.getenv("OLLAMA_BASE_URL")
+        or os.getenv("OLLAMA_HOST")
+        or (cfg_url if cfg_url and cfg_url.strip() else None)
+        or "http://localhost:11434"
+    )
+    resolved_model = (
+        ai_model
+        or os.getenv("OLLAMA_MODEL")
+        or (cfg_model if cfg_model and cfg_model.strip() else None)
+        or "llama3"
+    )
+    return str(resolved_url).strip(), str(resolved_model).strip()
+
+
 
 def _execute_pipeline(
     ctx: click.Context,
@@ -169,24 +205,15 @@ def _execute_pipeline(
             except Exception as exc:
                 console.warning(f"PoC generation skipped due to unexpected error: {exc}")
 
-        # AI Analysis (when requested or in deep/cloud/vuln mode) - fail-safe against remote network/GPU disconnects
+        # AI Analysis: activated by --ai flag, ai.enabled=true in config.yaml, or deep/cloud/vuln modes
         ai_summary = ""
         ai_model_name = ""
         attack_chain = ""
-        effective_ai_url = (
-            ai_url
-            or os.getenv("OLLAMA_BASE_URL")
-            or os.getenv("OLLAMA_HOST")
-            or getattr(getattr(config_mgr.config, "ai", None), "url", None)
-            or "http://localhost:11434"
-        )
-        effective_ai_model = (
-            ai_model
-            or os.getenv("OLLAMA_MODEL")
-            or getattr(getattr(config_mgr.config, "ai", None), "model", None)
-            or "llama3"
-        )
-        if ai or mode in ("deep", "cloud", "vuln"):
+        effective_ai_url, effective_ai_model = _resolve_ai_config(config_mgr, ai_url, ai_model)
+        # Honour config.yaml  ai.enabled = true  (so setting it auto-enables AI for all scans)
+        cfg_ai_enabled = bool(getattr(getattr(config_mgr.config, "ai", None), "enabled", False))
+        run_ai = ai or cfg_ai_enabled or mode in ("deep", "cloud", "vuln")
+        if run_ai:
             try:
                 from reconai.ai.local import OllamaAdapter
                 from reconai.ai.analyzer import Analyzer
@@ -210,7 +237,7 @@ def _execute_pipeline(
                         content += f"\n## Correlated Attack Kill Chain\n\n{attack_chain}\n"
                     ai_file.write_text(content, encoding="utf-8")
                     console.success(f"AI Report saved to: {ai_file}")
-                elif ai:
+                elif run_ai:
                     console.warning(
                         f"Could not connect to Ollama at '{llm.base_url}'. "
                         "If your GPU machine is running Ollama remotely, ensure OLLAMA_HOST=0.0.0.0:11434 is set on the GPU host, "
@@ -358,19 +385,7 @@ def ai(ctx: click.Context, target_or_scan_id: str, ai_url: str | None, ai_model:
     # Check if target_or_scan_id is an existing scan directory
     scan_dir = DatabaseManager.find_scan_dir(target_or_scan_id, base_out)
 
-    effective_ai_url = (
-        ai_url
-        or os.getenv("OLLAMA_BASE_URL")
-        or os.getenv("OLLAMA_HOST")
-        or getattr(getattr(config_mgr.config, "ai", None), "url", None)
-        or "http://localhost:11434"
-    )
-    effective_ai_model = (
-        ai_model
-        or os.getenv("OLLAMA_MODEL")
-        or getattr(getattr(config_mgr.config, "ai", None), "model", None)
-        or "llama3"
-    )
+    effective_ai_url, effective_ai_model = _resolve_ai_config(config_mgr, ai_url, ai_model)
 
     if scan_dir:
         from reconai.ai.local import OllamaAdapter
@@ -379,6 +394,11 @@ def ai(ctx: click.Context, target_or_scan_id: str, ai_url: str | None, ai_model:
         llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
 
         async def _run_ai_on_scan() -> None:
+            # Bug #7 fix: resolve the real scan_id from the DB, not the raw CLI argument
+            scans = db.list_scans(limit=1)
+            real_scan_id = scans[0]["id"] if scans else scan_dir.name
+            real_target = scans[0]["target"] if scans else target_or_scan_id
+
             if not await llm.is_available():
                 console.warning(
                     f"Could not connect to Ollama at '{llm.base_url}'. "
@@ -386,7 +406,7 @@ def ai(ctx: click.Context, target_or_scan_id: str, ai_url: str | None, ai_model:
                     "or create an SSH tunnel: ssh -L 11434:localhost:11434 user@<gpu-ip>"
                 )
                 return
-            analyzer = Analyzer(llm, db, target_or_scan_id)
+            analyzer = Analyzer(llm, db, real_scan_id)
             summary = await analyzer.summarize_findings()
             attack_chain = await analyzer.generate_attack_chain()
             console.console.print(f"\n[bold cyan]AI Threat Assessment ({llm.model} @ {llm.base_url}):[/bold cyan]\n{summary}\n")
@@ -396,14 +416,14 @@ def ai(ctx: click.Context, target_or_scan_id: str, ai_url: str | None, ai_model:
             reports_dir = scan_dir / "reports"
             reports_dir.mkdir(parents=True, exist_ok=True)
             ai_file = reports_dir / "ai_analysis.md"
-            content = f"# AI Threat Assessment: {target_or_scan_id}\n\n**Model:** `{llm.model}` (`{llm.base_url}`)\n\n{summary}\n"
+            content = f"# AI Threat Assessment: {real_target}\n\n**Model:** `{llm.model}` (`{llm.base_url}`)\n\n{summary}\n"
             if attack_chain and "Not enough findings" not in attack_chain:
                 content += f"\n## Correlated Attack Kill Chain\n\n{attack_chain}\n"
             ai_file.write_text(content, encoding="utf-8")
             console.success(f"Saved AI report to: {ai_file}")
 
             try:
-                gen = ReportGenerator(db, target_or_scan_id, scan_dir, ai_summary=summary, ai_model=llm.model, attack_chain=attack_chain)
+                gen = ReportGenerator(db, real_scan_id, scan_dir, ai_summary=summary, ai_model=llm.model, attack_chain=attack_chain)
                 gen.generate_all()
                 console.success(f"Updated HTML & Markdown reports with AI insights.")
             except Exception as e:
@@ -416,30 +436,6 @@ def ai(ctx: click.Context, target_or_scan_id: str, ai_url: str | None, ai_model:
 
 
 
-@cli.command()
-@click.argument("scan_id")
-@click.option("--out", type=click.Path(), help="Output directory for report")
-@click.pass_context
-def report(ctx: click.Context, scan_id: str, out: str | None) -> None:
-    """Generate a report for a past scan."""
-    console: ReconConsole = ctx.obj["console"]
-    config_mgr: ConfigManager = ctx.obj["config_mgr"]
-    
-    base_out = Path(config_mgr.config.output.base_dir)
-    scan_dir = DatabaseManager.find_scan_dir(scan_id, base_out)
-            
-    if not scan_dir:
-        console.error(f"Scan ID {scan_id} not found in {base_out}")
-        sys.exit(1)
-        
-    db = DatabaseManager(db_path=scan_dir / "reconai.db")
-    
-    try:
-        generator = ReportGenerator(db, scan_id, scan_dir)
-        reports = generator.generate_all()
-        console.success(f"Reports regenerated at {reports['markdown'].parent}")
-    except Exception as e:
-        console.error(f"Failed to generate report: {e}")
 
 
 @cli.command()
@@ -472,23 +468,21 @@ def doctor(ctx: click.Context) -> None:
         path = shutil.which(tool)
         if not path and tool == "cloud_enum":
             path = shutil.which("cloud-enum")
+        elif tool == "httpx":
+            # Prefer ProjectDiscovery httpx or httpx-toolkit; avoid python's venv httpx CLI
+            if path and (".venv" in path or "site-packages" in path):
+                filtered = os.pathsep.join(
+                    p for p in os.environ.get("PATH", "").split(os.pathsep) if ".venv" not in p
+                )
+                real_httpx = shutil.which("httpx-toolkit") or shutil.which("httpx", path=filtered)
+                path = real_httpx
+            elif not path:
+                path = shutil.which("httpx-toolkit")
         results[tool] = (bool(path), path or "Not installed")
         
     console.tool_availability(results)
 
 
-@cli.command()
-@click.pass_context
-def mcp(ctx: click.Context) -> None:
-    """Start the ReconAI MCP Server (Model Context Protocol)."""
-    console: ReconConsole = ctx.obj["console"]
-    console.info("Starting minimal MCP Server on stdio...")
-    
-    from reconai.mcp.server import run_mcp_server
-    try:
-        run_mcp_server()
-    except ImportError:
-        console.error("MCP Server dependencies not found. This is a minimal stub.")
 
 
 @cli.command()
@@ -595,8 +589,7 @@ def exploit(ctx: click.Context, scan_id: str, finding_title: str, ai_url: str | 
             
         from reconai.ai.local import OllamaAdapter
         from reconai.ai.analyzer import Analyzer
-        effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
-        effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
+        effective_ai_url, effective_ai_model = _resolve_ai_config(config_mgr, ai_url, ai_model)
         llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
         
         async def _run() -> None:
@@ -678,8 +671,7 @@ def report(ctx: click.Context, scan_path_or_id: str, ai: bool, ai_url: str | Non
         ai_summary = ""
         ai_model_name = ""
         attack_chain = ""
-        effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
-        effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
+        effective_ai_url, effective_ai_model = _resolve_ai_config(config_mgr, ai_url, ai_model)
         if ai:
             from reconai.ai.local import OllamaAdapter
             from reconai.ai.analyzer import Analyzer
@@ -757,8 +749,7 @@ def agent(ctx: click.Context, scan_path_or_id: str, ai_url: str | None, ai_model
         scan_id = scans[0]["id"] if scans else scan_dir.name
         target = scans[0]["target"] if scans else scan_dir.parent.name
 
-        effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
-        effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
+        effective_ai_url, effective_ai_model = _resolve_ai_config(config_mgr, ai_url, ai_model)
         llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
 
         console.banner()
@@ -813,8 +804,7 @@ def verify(ctx: click.Context, scan_path_or_id: str, ai_url: str | None, ai_mode
         scan_id = scans[0]["id"] if scans else scan_dir.name
         target = scans[0]["target"] if scans else scan_dir.parent.name
 
-        effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
-        effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
+        effective_ai_url, effective_ai_model = _resolve_ai_config(config_mgr, ai_url, ai_model)
         llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
 
         console.banner()
@@ -872,8 +862,7 @@ def threat_profile(ctx: click.Context, scan_path_or_id: str, ai_url: str | None,
         scan_id = scans[0]["id"] if scans else scan_dir.name
         target = scans[0]["target"] if scans else scan_dir.parent.name
 
-        effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
-        effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
+        effective_ai_url, effective_ai_model = _resolve_ai_config(config_mgr, ai_url, ai_model)
         llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
 
         console.banner()
@@ -968,8 +957,7 @@ def waf_advisor(ctx: click.Context, scan_path_or_id: str, ai_url: str | None, ai
         scan_id = scans[0]["id"] if scans else scan_dir.name
         target = scans[0]["target"] if scans else scan_dir.parent.name
 
-        effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
-        effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
+        effective_ai_url, effective_ai_model = _resolve_ai_config(config_mgr, ai_url, ai_model)
         llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
 
         console.banner()
@@ -1018,8 +1006,7 @@ def chat(ctx: click.Context, scan_path_or_id: str, ai_url: str | None, ai_model:
         scan_id = scans[0]["id"] if scans else scan_dir.name
         target = scans[0]["target"] if scans else scan_dir.parent.name
 
-        effective_ai_url = ai_url or getattr(getattr(config_mgr.config, "ai", None), "url", None)
-        effective_ai_model = ai_model or getattr(getattr(config_mgr.config, "ai", None), "model", None)
+        effective_ai_url, effective_ai_model = _resolve_ai_config(config_mgr, ai_url, ai_model)
         llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
 
         console.banner()
@@ -1086,6 +1073,228 @@ def ai_agent_cmd(ctx: click.Context, scan_path_or_id: str, ai_url: str | None, a
 def profile_threat_cmd(ctx: click.Context, scan_path_or_id: str, ai_url: str | None, ai_model: str | None) -> None:
     """AI Threat Actor & TTP Profiler (alias for threat-profile)."""
     ctx.invoke(threat_profile, scan_path_or_id=scan_path_or_id, ai_url=ai_url, ai_model=ai_model)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# reconai shell — Natural Language AI Security Operator Shell
+# ══════════════════════════════════════════════════════════════════════════════
+
+@cli.command("shell")
+@click.option("--ai-url", type=str, help="Ollama server URL (e.g. http://192.168.1.50:11434)")
+@click.option("--ai-model", type=str, help="LLM model name (e.g. llama3, deepseek-r1:7b)")
+@click.option("--workspace", type=click.Path(), default=None,
+              help="Directory for storing tool output files (default: ./agent_workspace)")
+@click.option("--verbose", is_flag=True, default=False, help="Show raw tool commands as they run")
+@click.pass_context
+def shell(
+    ctx: click.Context,
+    ai_url: str | None,
+    ai_model: str | None,
+    workspace: str | None,
+    verbose: bool,
+) -> None:
+    """Interactive AI Security Shell — type tasks in plain English.
+
+    The AI agent parses your request, selects the right Kali/recon tools,
+    executes them, and returns structured findings with full analysis.
+
+    \b
+    Examples:
+      reconai shell
+      reconai shell --ai-url http://192.168.1.50:11434 --ai-model deepseek-r1:7b
+
+    \b
+    Inside the shell, type things like:
+      > scan example.com for open ports
+      > find subdomains of target.com
+      > check for XSS on https://target.com/search?q=test
+      > what technologies does google.com use?
+      > run full recon on 192.168.1.100
+      > check for CVE-2023-44487 on target.com
+      > /help  — show all shell commands
+    """
+    from rich.console import Console
+    from rich.panel import Panel
+
+    console_rich = Console()
+    config_mgr: ConfigManager = ctx.obj["config_mgr"]
+
+    effective_ai_url, effective_ai_model = _resolve_ai_config(config_mgr, ai_url, ai_model)
+
+    workspace_dir = Path(workspace) if workspace else None
+
+    async def _start_shell() -> None:
+        from reconai.ai.local import OllamaAdapter
+        from reconai.ai.shell_agent import NaturalLanguageShellAgent
+        from reconai.ai.shell_repl import AIShell
+
+        llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
+
+        # Check LLM availability
+        if not await llm.is_available():
+            console_rich.print(Panel(
+                f"[red]Cannot connect to Ollama at [bold]{llm.base_url}[/bold][/red]\n\n"
+                "[white]To fix this:[/white]\n"
+                "  1. Start Ollama on this machine:  [cyan]ollama serve[/cyan]\n"
+                "  2. Or on a remote GPU machine:\n"
+                "     [cyan]OLLAMA_HOST=0.0.0.0:11434 ollama serve[/cyan]\n"
+                "     Then use: [cyan]--ai-url http://<GPU_IP>:11434[/cyan]\n\n"
+                "[dim]You can also set [white]ai.url[/white] and [white]ai.enabled: true[/white] "
+                "in [white]config.yaml[/white] to avoid flags.[/dim]",
+                title="[red] Ollama Not Reachable[/red]",
+                border_style="red",
+            ))
+            return
+
+        console_rich.print(
+            f"[green]✓[/green] Connected to [cyan]{llm.model}[/cyan] at [cyan]{llm.base_url}[/cyan]"
+        )
+
+        agent = NaturalLanguageShellAgent(
+            ai=llm,
+            workspace_dir=workspace_dir,
+            verbose=verbose,
+        )
+        shell_repl = AIShell(agent)
+        await shell_repl.run()
+
+    asyncio.run(_start_shell())
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# reconai nexus — Revolutionary AI Security Operations Platform
+# ══════════════════════════════════════════════════════════════════════════════
+
+@cli.command("nexus")
+@click.option("--ai-url", type=str, help="Ollama URL (e.g. http://192.168.1.50:11434)")
+@click.option("--ai-model", type=str, help="LLM model (e.g. deepseek-r1:7b, llama3)")
+@click.option(
+    "--mode",
+    type=click.Choice(["autopilot", "copilot", "manual"], case_sensitive=False),
+    default="copilot",
+    show_default=True,
+    help="Operation mode: autopilot (AI drives all), copilot (AI+human), manual (human+AI analysis)",
+)
+@click.option("--workspace", type=click.Path(), default=None,
+              help="Directory for tool logs/output (default: ./nexus_workspace)")
+@click.option("--no-risk-gate", is_flag=True, default=False,
+              help="Disable confirmation prompts for critical-risk tools (DANGEROUS)")
+@click.pass_context
+def nexus(
+    ctx: click.Context,
+    ai_url: str | None,
+    ai_model: str | None,
+    mode: str,
+    workspace: str | None,
+    no_risk_gate: bool,
+) -> None:
+    """NEXUS — AI Security Operations Platform. The future of offensive security.
+
+    Three operation modes:
+
+    \b
+    AUTOPILOT  AI defines and executes the entire attack plan autonomously.
+               You define the mission goal. AI does the rest.
+
+    \b
+    COPILOT    AI and human collaborate. AI proposes each step with rationale.
+               Human reviews and approves before execution.
+
+    \b
+    MANUAL     Human runs any Kali tool freely. AI analyses all output in
+               real-time, extracts findings, and suggests next steps.
+
+    \b
+    Examples:
+      reconai nexus                                    # Copilot mode (default)
+      reconai nexus --mode autopilot                   # Full AI autopilot
+      reconai nexus --mode manual                      # Manual + AI analysis
+      reconai nexus --ai-url http://192.168.1.50:11434 --ai-model deepseek-r1:7b
+
+    \b
+    Inside NEXUS:
+      > mission find all vulnerabilities on target.com
+      > target 192.168.1.100
+      > mode autopilot
+      > run
+      > ask what is the blast radius of this SQLi?
+      > exec nmap -sV -p- target.com
+      > tools
+      > findings
+      > chain
+      > report
+      > save
+    """
+    from rich.console import Console
+    from rich.panel import Panel
+
+    console_rich = Console()
+    config_mgr: ConfigManager = ctx.obj["config_mgr"]
+
+    effective_ai_url, effective_ai_model = _resolve_ai_config(config_mgr, ai_url, ai_model)
+    workspace_dir = Path(workspace) if workspace else None
+
+    mode_map = {
+        "autopilot": "AUTOPILOT",
+        "copilot": "COPILOT",
+        "manual": "MANUAL",
+    }
+
+    async def _start_nexus() -> None:
+        from reconai.ai.local import OllamaAdapter
+        from reconai.ai.nexus_agent import NexusAgent, OperationMode
+        from reconai.ai.nexus_shell import NexusShell
+        from reconai.ai.tool_discovery import KaliToolDiscovery
+
+        # Dynamic tool discovery
+        console_rich.print("[dim cyan]Scanning for installed security tools...[/dim cyan]")
+        discovery = KaliToolDiscovery()
+        discovery.scan()
+        stats = discovery.stats()
+        console_rich.print(
+            f"[green]✓[/green] Discovered [bold]{stats['available']}[/bold] tools "
+            f"({stats['total_known']} in knowledge base)"
+        )
+
+        # LLM connection
+        llm = OllamaAdapter(model=effective_ai_model, base_url=effective_ai_url)
+        if not await llm.is_available():
+            console_rich.print(Panel(
+                f"[red]Cannot connect to Ollama at [bold]{llm.base_url}[/bold][/red]\n\n"
+                "[white]NEXUS requires an LLM to operate. Fix:[/white]\n"
+                "  1. Local: [cyan]ollama serve && ollama pull llama3[/cyan]\n"
+                "  2. Remote GPU: [cyan]OLLAMA_HOST=0.0.0.0:11434 ollama serve[/cyan]\n"
+                "     Then: [cyan]--ai-url http://<GPU_IP>:11434[/cyan]\n\n"
+                "[dim]Or set [white]ai.url[/white] + [white]ai.enabled: true[/white] "
+                "in [white]config.yaml[/white][/dim]",
+                title="[red]Ollama Not Available[/red]",
+                border_style="red",
+            ))
+            return
+
+        console_rich.print(
+            f"[green]✓[/green] LLM: [cyan]{llm.model}[/cyan] @ [cyan]{llm.base_url}[/cyan]"
+        )
+
+        op_mode = OperationMode[mode_map[mode.lower()]]
+        agent = NexusAgent(
+            ai=llm,
+            discovery=discovery,
+            mode=op_mode,
+            workspace=workspace_dir,
+            risk_gate=not no_risk_gate,
+        )
+        shell = NexusShell(agent=agent, discovery=discovery)
+        await shell.run()
+
+    asyncio.run(_start_nexus())
+
+
+# ── Help / onboarding commands ────────────────────────────────────────────────
+# Registered last so they appear at the bottom of `reconai --help` output but
+# don't interfere with any of the pipeline commands defined above.
+from reconai.cli.help import register_help_commands  # noqa: E402
+register_help_commands(cli)
 
 
 if __name__ == "__main__":

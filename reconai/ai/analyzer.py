@@ -99,7 +99,7 @@ class Analyzer:
         cisa_kev_count = 0
         if cves:
             for cve_id in cves[:5]:
-                intel = self.exploit_lookup.search(cve_id)
+                intel = await asyncio.to_thread(self.exploit_lookup.search, cve_id)
                 if intel.is_in_cisa_kev:
                     cisa_kev_count += 1
 
@@ -242,17 +242,17 @@ class Analyzer:
             "The following vulnerabilities were discovered on a target during a "
             "penetration test. Construct a realistic, step-by-step attack chain "
             "showing how an adversary would chain these vulnerabilities to go from "
-            "ZERO ACCESS to FULL COMPROMISE.\\n\\n"
-            f"TARGET: {stats.get('target', 'unknown')}\\n"
-            f"VULNERABILITIES DISCOVERED:\\n{findings_text}\\n\\n"
-            "Format your response as:\\n"
-            "## Attack Chain: [Title]\\n\\n"
-            "**Starting Point**: Describe attacker's initial position\\n\\n"
-            "**Phase 1 - Initial Access**: Which vuln, how used\\n"
-            "**Phase 2 - Foothold**: What access is gained\\n"
-            "**Phase 3 - Escalation**: How attacker expands access\\n"
-            "**Phase 4 - Objective**: What attacker achieves\\n\\n"
-            "**MITRE ATT&CK Techniques**: List relevant T-IDs\\n\\n"
+            "ZERO ACCESS to FULL COMPROMISE.\n\n"
+            f"TARGET: {stats.get('target', 'unknown')}\n"
+            f"VULNERABILITIES DISCOVERED:\n{findings_text}\n\n"
+            "Format your response as:\n"
+            "## Attack Chain: [Title]\n\n"
+            "**Starting Point**: Describe attacker's initial position\n\n"
+            "**Phase 1 - Initial Access**: Which vuln, how used\n"
+            "**Phase 2 - Foothold**: What access is gained\n"
+            "**Phase 3 - Escalation**: How attacker expands access\n"
+            "**Phase 4 - Objective**: What attacker achieves\n\n"
+            "**MITRE ATT&CK Techniques**: List relevant T-IDs\n\n"
             "Be technically precise and realistic. Name specific commands where applicable."
         )
         narrative = await self.ai.analyze(prompt)
@@ -276,11 +276,11 @@ class Analyzer:
     async def explain_finding(self, finding: dict) -> str:
         """Explain a finding in plain language for a non-technical stakeholder."""
         prompt = (
-            f"Explain this security vulnerability to a non-technical executive:\\n"
-            f"Title: {finding['title']}\\n"
-            f"Severity: {finding['severity']}\\n"
-            f"Asset: {finding['affected_asset']}\\n"
-            f"Description: {finding.get('description', '')}\\n\\n"
+            f"Explain this security vulnerability to a non-technical executive:\n"
+            f"Title: {finding['title']}\n"
+            f"Severity: {finding['severity']}\n"
+            f"Asset: {finding['affected_asset']}\n"
+            f"Description: {finding.get('description', '')}\n\n"
             "Use an analogy. Explain: what it is, what an attacker can do, "
             "and what needs to be done to fix it. Keep it under 150 words."
         )
@@ -362,35 +362,35 @@ class Analyzer:
             output_lines.append(kev_warning)
 
         if cve_context_str:
-            output_lines.append(f"\\nCVE Intelligence:{cve_context_str}")
+            output_lines.append(f"\nCVE Intelligence:{cve_context_str}")
 
         if public_exploits_str:
             output_lines.append(public_exploits_str)
 
-        output_lines.append(f"\\n{'─'*70}")
+        output_lines.append(f"\n{'─'*70}")
         output_lines.append("CURL VERIFICATION COMMAND:")
         output_lines.append(poc.curl_command or "N/A")
 
-        output_lines.append(f"\\n{'─'*70}")
+        output_lines.append(f"\n{'─'*70}")
         output_lines.append("RUNNABLE PYTHON PoC SCRIPT:")
         output_lines.append(poc.python_script or "N/A")
 
         if poc.nuclei_template:
-            output_lines.append(f"\\n{'─'*70}")
+            output_lines.append(f"\n{'─'*70}")
             output_lines.append("NUCLEI TEMPLATE (save as custom-{finding}.yaml):")
             output_lines.append(poc.nuclei_template)
 
         if poc.verification_steps:
-            output_lines.append(f"\\n{'─'*70}")
+            output_lines.append(f"\n{'─'*70}")
             output_lines.append("VERIFICATION STEPS:")
             output_lines.extend(poc.verification_steps)
 
-        output_lines.append(f"\\n{'─'*70}")
+        output_lines.append(f"\n{'─'*70}")
         output_lines.append("AI ADVANCED EXPLOITATION ANALYSIS:")
         output_lines.append(ai_analysis)
         output_lines.append(separator)
 
-        return "\\n".join(output_lines)
+        return "\n".join(output_lines)
 
     # ─────────────────────────────────────────────────────────────────────
     # Private helpers
@@ -399,16 +399,16 @@ class Analyzer:
         self, finding: dict, cve_context: str
     ) -> str:
         prompt = (
-            f"You are a red team lead. Explain how to exploit this finding:\\n"
-            f"Title: {finding['title']}\\n"
-            f"Asset: {finding['affected_asset']}\\n"
-            f"Description: {finding.get('description', '')}\\n"
-            f"{cve_context}\\n\\n"
-            "Provide:\\n"
-            "1. Exploitation prerequisites\\n"
-            "2. Step-by-step attack execution\\n"
-            "3. Expected outcome and impact evidence\\n"
-            "4. MITRE ATT&CK technique (T-ID)\\n"
+            f"You are a red team lead. Explain how to exploit this finding:\n"
+            f"Title: {finding['title']}\n"
+            f"Asset: {finding['affected_asset']}\n"
+            f"Description: {finding.get('description', '')}\n"
+            f"{cve_context}\n\n"
+            "Provide:\n"
+            "1. Exploitation prerequisites\n"
+            "2. Step-by-step attack execution\n"
+            "3. Expected outcome and impact evidence\n"
+            "4. MITRE ATT&CK technique (T-ID)\n"
             "Be technical and precise."
         )
         return await self.ai.analyze(prompt)
@@ -418,7 +418,7 @@ class Analyzer:
     ) -> str:
         if not cve_records:
             return ""
-        lines = ["\\nCVE Intelligence:"]
+        lines = ["\nCVE Intelligence:"]
         for cve, exp in zip(cve_records, exploit_records):
             lines.append(
                 f"  {cve.cve_id}: CVSS {cve.cvss_v3_score} [{cve.cvss_severity}] "
@@ -431,7 +431,7 @@ class Analyzer:
                 lines.append(f"    Public exploits: {exp.exploit_count}")
                 for e in exp.exploits[:2]:
                     lines.append(f"      - [{e.source}] {e.url}")
-        return "\\n".join(lines)
+        return "\n".join(lines)
 
     def _extract_all_cves(self, findings: list[dict]) -> list[str]:
         cves = set()

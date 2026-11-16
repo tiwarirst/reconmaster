@@ -158,6 +158,8 @@ class CrawlerModule(ReconModule):
 
         CONCURRENCY = 8
         active_workers = 0
+        # BUG-008 FIX: guard active_workers with asyncio.Lock — plain int mutations across concurrent tasks are not safe
+        _workers_lock = asyncio.Lock()
 
         async def worker() -> None:
             nonlocal active_workers
@@ -165,11 +167,13 @@ class CrawlerModule(ReconModule):
                 try:
                     url, depth = await asyncio.wait_for(queue.get(), timeout=1.8)
                 except (asyncio.TimeoutError, asyncio.QueueEmpty):
-                    if active_workers == 0:
-                        break
+                    async with _workers_lock:  # BUG-008 FIX: check under lock to prevent race where two workers both see 0 and both exit
+                        if active_workers == 0:
+                            break
                     continue
 
-                active_workers += 1
+                async with _workers_lock:  # BUG-008 FIX: increment under lock
+                    active_workers += 1
                 try:
                     clean_url = url.split("#")[0]
                     async with lock:
@@ -340,7 +344,8 @@ class CrawlerModule(ReconModule):
                     except Exception as exc:
                         self.logger.debug(f"Crawl error for {url}: {exc}", module=self.config.name)
                 finally:
-                    active_workers -= 1
+                    async with _workers_lock:  # BUG-008 FIX: decrement under lock
+                        active_workers -= 1
                     queue.task_done()
 
         # Run concurrent workers

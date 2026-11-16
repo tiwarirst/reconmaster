@@ -20,6 +20,7 @@ Fix applied (Flaw 13):
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import deque
 from typing import Any, Callable, Coroutine
 
@@ -141,10 +142,15 @@ class EventBus:
         """Call a handler with error isolation."""
         try:
             await handler(event)
-        except Exception:
-            # One handler failure must never prevent other handlers
-            # from receiving the event — swallow and continue.
-            pass
+        except Exception as e:
+            # BUG-028 FIX: log swallowed handler exceptions at DEBUG level for debuggability — silent failures make handler bugs impossible to diagnose
+            logging.getLogger(__name__).debug(
+                "[EventBus] Handler %r raised %s: %s",
+                getattr(handler, "__name__", repr(handler)),
+                type(e).__name__,
+                e,
+                exc_info=True,
+            )
 
     def get_history(
         self,

@@ -23,6 +23,19 @@ warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
 error()   { echo -e "${RED}[-]${NC} $1"; }
 
 check_tool() {
+    local tool="$1"
+    if [ "$tool" = "httpx" ]; then
+        local p
+        p=$(which -a httpx 2>/dev/null | grep -v "/.venv/" | head -n 1 || true)
+        if [ -n "$p" ]; then
+            info "httpx found: $p"
+        elif command -v httpx-toolkit &>/dev/null; then
+            info "httpx (httpx-toolkit) found: $(command -v httpx-toolkit)"
+        else
+            warn "httpx not found (install: sudo apt install httpx-toolkit or go install github.com/projectdiscovery/httpx/cmd/httpx@latest)"
+        fi
+        return
+    fi
     if command -v "$1" &>/dev/null; then
         info "$1 found: $(command -v "$1")"
     else

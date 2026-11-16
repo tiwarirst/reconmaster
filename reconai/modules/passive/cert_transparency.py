@@ -47,15 +47,23 @@ class CertTransparencyModule(ReconModule):
             )
 
             subdomains: set[str] = set()
-            if isinstance(crt_res, set):
+            # BUG-011 FIX: log when CT sources fail so operators know why subdomain results are sparse
+            if isinstance(crt_res, Exception):
+                self.logger.warning(f"[cert_transparency] crt.sh query failed: {type(crt_res).__name__}: {crt_res}")
+            elif isinstance(crt_res, set):
                 subdomains.update(crt_res)
-            if isinstance(fall_res, set):
+
+            if isinstance(fall_res, Exception):
+                self.logger.warning(f"[cert_transparency] Passive fallback query failed: {type(fall_res).__name__}: {fall_res}")
+            elif isinstance(fall_res, set):
                 subdomains.update(fall_res)
 
             # Ensure baseline domain and www are present if no subdomains found
             if not subdomains:
                 subdomains.add(domain)
-                subdomains.add(f"www.{domain}")
+                # BUG-034 FIX: don't prepend www. for IP address targets — www.192.168.1.1 is not a valid hostname
+                if not domain[0].isdigit():
+                    subdomains.add(f"www.{domain}")
 
             records = [
                 SubdomainRecord(

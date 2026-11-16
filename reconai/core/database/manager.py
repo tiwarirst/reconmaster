@@ -16,6 +16,7 @@ Correctness principles applied:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import threading
@@ -274,6 +275,12 @@ class DatabaseManager:
         self._conn.executescript(SCHEMA)
         self._conn.commit()
 
+    async def async_connect(self) -> None:
+        # BUG-001 FIX: sqlite3.connect() is a blocking I/O call. Calling it directly
+        # from an async context blocks the event loop. Offload to a thread pool so
+        # asyncio can keep processing other coroutines while the DB opens.
+        await asyncio.to_thread(self.connect)
+
     def close(self) -> None:
         if self._conn:
             self._conn.close()
@@ -311,9 +318,18 @@ class DatabaseManager:
         return scan_obj.id
 
     def update_scan_status(self, scan_id: str, status: ScanStatus, **kwargs: Any) -> None:
+        # BUG-023 FIX: validate column names against allowlist to prevent SQL injection via kwargs keys
+        _VALID_SCAN_COLUMNS = frozenset({
+            "status", "end_time", "completed_at", "duration", "total_findings",
+            "critical_count", "high_count", "medium_count", "low_count", "info_count",
+            "subdomains_found", "urls_found", "ports_found", "error_message",
+            "modules_completed", "modules_failed",
+        })
         sets = ["status = ?"]
         vals: list[Any] = [status.value]
         for k, v in kwargs.items():
+            if k not in _VALID_SCAN_COLUMNS:
+                raise ValueError(f"update_scan_status: invalid column '{k}'")  # BUG-023 FIX
             sets.append(f"{k} = ?")
             vals.append(v.isoformat() if isinstance(v, datetime) else v)
         vals.append(scan_id)
@@ -346,48 +362,51 @@ class DatabaseManager:
 
     def insert_subdomain(self, record: SubdomainRecord) -> int:
         try:
-            cur = self.conn.execute(
-                "INSERT OR IGNORE INTO subdomains "
-                "(scan_id, subdomain, domain, sources, resolved_ips, http_status, https_status, "
-                "title, first_seen, last_seen, is_alive, priority) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (record.scan_id, record.subdomain, record.domain,
-                 json.dumps(record.sources), json.dumps(record.resolved_ips),
-                 record.http_status, record.https_status, record.title,
-                 record.first_seen.isoformat(), record.last_seen.isoformat(),
-                 int(record.is_alive), record.priority),
-            )
-            self.conn.commit()
-            return cur.lastrowid or 0
+            with self._lock:  # BUG-002 FIX: guard concurrent sqlite writes
+                cur = self.conn.execute(
+                    "INSERT OR IGNORE INTO subdomains "
+                    "(scan_id, subdomain, domain, sources, resolved_ips, http_status, https_status, "
+                    "title, first_seen, last_seen, is_alive, priority) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (record.scan_id, record.subdomain, record.domain,
+                     json.dumps(record.sources), json.dumps(record.resolved_ips),
+                     record.http_status, record.https_status, record.title,
+                     record.first_seen.isoformat(), record.last_seen.isoformat(),
+                     int(record.is_alive), record.priority),
+                )
+                self.conn.commit()
+                return cur.lastrowid or 0
         except Exception:
             return 0
 
     def insert_dns_record(self, record: DNSRecord) -> int:
         """Insert a DNS record, silently ignoring duplicates."""
         try:
-            cur = self.conn.execute(
-                "INSERT OR IGNORE INTO dns_records "
-                "(scan_id, hostname, record_type, value, ttl, source, timestamp) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (record.scan_id, record.hostname, record.record_type, record.value,
-                 record.ttl, record.source, record.timestamp.isoformat()),
-            )
-            self.conn.commit()
-            return cur.lastrowid or 0
+            with self._lock:  # BUG-002 FIX: guard concurrent sqlite writes
+                cur = self.conn.execute(
+                    "INSERT OR IGNORE INTO dns_records "
+                    "(scan_id, hostname, record_type, value, ttl, source, timestamp) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (record.scan_id, record.hostname, record.record_type, record.value,
+                     record.ttl, record.source, record.timestamp.isoformat()),
+                )
+                self.conn.commit()
+                return cur.lastrowid or 0
         except Exception:
             return 0
 
     def insert_ip(self, record: IPRecord) -> int:
         try:
-            cur = self.conn.execute(
-                "INSERT OR IGNORE INTO ips "
-                "(scan_id, ip, version, hostnames, asn, asn_org, country, is_private, source) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (record.scan_id, record.ip, record.version, json.dumps(record.hostnames),
-                 record.asn, record.asn_org, record.country, int(record.is_private), record.source),
-            )
-            self.conn.commit()
-            return cur.lastrowid or 0
+            with self._lock:  # BUG-002 FIX: guard concurrent sqlite writes
+                cur = self.conn.execute(
+                    "INSERT OR IGNORE INTO ips "
+                    "(scan_id, ip, version, hostnames, asn, asn_org, country, is_private, source) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (record.scan_id, record.ip, record.version, json.dumps(record.hostnames),
+                     record.asn, record.asn_org, record.country, int(record.is_private), record.source),
+                )
+                self.conn.commit()
+                return cur.lastrowid or 0
         except Exception:
             return 0
 
@@ -403,41 +422,43 @@ class DatabaseManager:
           - source is always updated to reflect the latest data origin.
         """
         try:
-            cur = self.conn.execute(
-                """
-                INSERT INTO ports
-                    (scan_id, host, port, protocol, state, service, product, version, banner, cpe, source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(scan_id, host, port, protocol) DO UPDATE SET
-                    service = CASE WHEN excluded.service != '' THEN excluded.service ELSE service END,
-                    product = CASE WHEN excluded.product != '' THEN excluded.product ELSE product END,
-                    version = CASE WHEN excluded.version != '' THEN excluded.version ELSE version END,
-                    cpe     = CASE WHEN excluded.cpe     != '' THEN excluded.cpe     ELSE cpe     END,
-                    banner  = CASE WHEN excluded.banner  != '' THEN excluded.banner  ELSE banner  END,
-                    source  = excluded.source
-                """,
-                (record.scan_id, record.host, record.port, record.protocol, record.state,
-                 record.service, record.product, record.version, record.banner, record.cpe, record.source),
-            )
-            self.conn.commit()
-            return cur.lastrowid or 0
+            with self._lock:  # BUG-002 FIX: guard concurrent sqlite writes
+                cur = self.conn.execute(
+                    """
+                    INSERT INTO ports
+                        (scan_id, host, port, protocol, state, service, product, version, banner, cpe, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(scan_id, host, port, protocol) DO UPDATE SET
+                        service = CASE WHEN excluded.service != '' THEN excluded.service ELSE service END,
+                        product = CASE WHEN excluded.product != '' THEN excluded.product ELSE product END,
+                        version = CASE WHEN excluded.version != '' THEN excluded.version ELSE version END,
+                        cpe     = CASE WHEN excluded.cpe     != '' THEN excluded.cpe     ELSE cpe     END,
+                        banner  = CASE WHEN excluded.banner  != '' THEN excluded.banner  ELSE banner  END,
+                        source  = excluded.source
+                    """,
+                    (record.scan_id, record.host, record.port, record.protocol, record.state,
+                     record.service, record.product, record.version, record.banner, record.cpe, record.source),
+                )
+                self.conn.commit()
+                return cur.lastrowid or 0
         except Exception:
             return 0
 
     def insert_url(self, record: URLRecord) -> int:
         """Insert a URL record, silently ignoring duplicates (same scan, url, method)."""
         try:
-            cur = self.conn.execute(
-                "INSERT OR IGNORE INTO urls "
-                "(scan_id, url, method, status_code, content_type, content_length, "
-                "title, redirect_url, source, depth) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (record.scan_id, record.url, record.method, record.status_code,
-                 record.content_type, record.content_length, record.title,
-                 record.redirect_url, record.source, record.depth),
-            )
-            self.conn.commit()
-            return cur.lastrowid or 0
+            with self._lock:  # BUG-002 FIX: guard concurrent sqlite writes
+                cur = self.conn.execute(
+                    "INSERT OR IGNORE INTO urls "
+                    "(scan_id, url, method, status_code, content_type, content_length, "
+                    "title, redirect_url, source, depth) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (record.scan_id, record.url, record.method, record.status_code,
+                     record.content_type, record.content_length, record.title,
+                     record.redirect_url, record.source, record.depth),
+                )
+                self.conn.commit()
+                return cur.lastrowid or 0
         except Exception:
             return 0
 
@@ -451,15 +472,16 @@ class DatabaseManager:
                  r.content_length, r.title, r.redirect_url, r.source, r.depth)
                 for r in records
             ]
-            cur = self.conn.executemany(
-                "INSERT OR IGNORE INTO urls "
-                "(scan_id, url, method, status_code, content_type, content_length, "
-                "title, redirect_url, source, depth) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params,
-            )
-            self.conn.commit()
-            return cur.rowcount
+            with self._lock:  # BUG-002 FIX: guard concurrent sqlite writes
+                cur = self.conn.executemany(
+                    "INSERT OR IGNORE INTO urls "
+                    "(scan_id, url, method, status_code, content_type, content_length, "
+                    "title, redirect_url, source, depth) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params,
+                )
+                self.conn.commit()
+                return cur.rowcount
         except Exception:
             return 0
 
@@ -475,15 +497,16 @@ class DatabaseManager:
                  int(r.is_alive), r.priority)
                 for r in records
             ]
-            cur = self.conn.executemany(
-                "INSERT OR IGNORE INTO subdomains "
-                "(scan_id, subdomain, domain, sources, resolved_ips, http_status, https_status, "
-                "title, first_seen, last_seen, is_alive, priority) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params,
-            )
-            self.conn.commit()
-            return cur.rowcount
+            with self._lock:  # BUG-002 FIX: guard concurrent sqlite writes
+                cur = self.conn.executemany(
+                    "INSERT OR IGNORE INTO subdomains "
+                    "(scan_id, subdomain, domain, sources, resolved_ips, http_status, https_status, "
+                    "title, first_seen, last_seen, is_alive, priority) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params,
+                )
+                self.conn.commit()
+                return cur.rowcount
         except Exception:
             return 0
 
@@ -497,14 +520,15 @@ class DatabaseManager:
                  r.content_type, r.auth_required, r.source, r.api_type)
                 for r in records
             ]
-            cur = self.conn.executemany(
-                "INSERT OR IGNORE INTO api_endpoints "
-                "(scan_id, host, method, path, full_url, content_type, auth_required, source, api_type) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params,
-            )
-            self.conn.commit()
-            return cur.rowcount
+            with self._lock:  # BUG-002 FIX: guard concurrent sqlite writes
+                cur = self.conn.executemany(
+                    "INSERT OR IGNORE INTO api_endpoints "
+                    "(scan_id, host, method, path, full_url, content_type, auth_required, source, api_type) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params,
+                )
+                self.conn.commit()
+                return cur.rowcount
         except Exception:
             return 0
 
@@ -518,21 +542,22 @@ class DatabaseManager:
                  r.service, r.product, r.version, r.banner, r.cpe, r.source)
                 for r in records
             ]
-            cur = self.conn.executemany(
-                """INSERT INTO ports (scan_id, host, port, protocol, state, service, product, version, banner, cpe, source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(scan_id, host, port, protocol) DO UPDATE SET
-                    state   = excluded.state,
-                    service = CASE WHEN excluded.service != '' THEN excluded.service ELSE service END,
-                    product = CASE WHEN excluded.product != '' THEN excluded.product ELSE product END,
-                    version = CASE WHEN excluded.version != '' THEN excluded.version ELSE version END,
-                    banner  = CASE WHEN excluded.banner  != '' THEN excluded.banner  ELSE banner  END,
-                    source  = excluded.source
-                """,
-                params,
-            )
-            self.conn.commit()
-            return cur.rowcount
+            with self._lock:  # BUG-002 FIX: guard concurrent sqlite writes
+                cur = self.conn.executemany(
+                    """INSERT INTO ports (scan_id, host, port, protocol, state, service, product, version, banner, cpe, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(scan_id, host, port, protocol) DO UPDATE SET
+                        state   = excluded.state,
+                        service = CASE WHEN excluded.service != '' THEN excluded.service ELSE service END,
+                        product = CASE WHEN excluded.product != '' THEN excluded.product ELSE product END,
+                        version = CASE WHEN excluded.version != '' THEN excluded.version ELSE version END,
+                        banner  = CASE WHEN excluded.banner  != '' THEN excluded.banner  ELSE banner  END,
+                        source  = excluded.source
+                    """,
+                    params,
+                )
+                self.conn.commit()
+                return cur.rowcount
         except Exception:
             return 0
 
@@ -546,14 +571,15 @@ class DatabaseManager:
                  r.confidence, r.source, json.dumps(r.evidence))
                 for r in records
             ]
-            cur = self.conn.executemany(
-                "INSERT OR IGNORE INTO technologies "
-                "(scan_id, host, name, category, version, confidence, source, evidence) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                params,
-            )
-            self.conn.commit()
-            return cur.rowcount
+            with self._lock:  # BUG-002 FIX: guard concurrent sqlite writes
+                cur = self.conn.executemany(
+                    "INSERT OR IGNORE INTO technologies "
+                    "(scan_id, host, name, category, version, confidence, source, evidence) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    params,
+                )
+                self.conn.commit()
+                return cur.rowcount
         except Exception:
             return 0
 
@@ -566,57 +592,61 @@ class DatabaseManager:
                 (r.scan_id, r.hostname, r.record_type, r.value, r.ttl, r.source, r.timestamp.isoformat())
                 for r in records
             ]
-            cur = self.conn.executemany(
-                "INSERT OR IGNORE INTO dns_records "
-                "(scan_id, hostname, record_type, value, ttl, source, timestamp) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                params,
-            )
-            self.conn.commit()
-            return cur.rowcount
+            with self._lock:  # BUG-002 FIX: guard concurrent sqlite writes
+                cur = self.conn.executemany(
+                    "INSERT OR IGNORE INTO dns_records "
+                    "(scan_id, hostname, record_type, value, ttl, source, timestamp) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    params,
+                )
+                self.conn.commit()
+                return cur.rowcount
         except Exception:
             return 0
 
     def insert_technology(self, record: TechnologyRecord) -> int:
         try:
-            cur = self.conn.execute(
-                "INSERT OR IGNORE INTO technologies "
-                "(scan_id, host, name, category, version, confidence, source, evidence) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (record.scan_id, record.host, record.name, record.category,
-                 record.version, record.confidence, record.source, json.dumps(record.evidence)),
-            )
-            self.conn.commit()
-            return cur.lastrowid or 0
+            with self._lock:  # BUG-002 FIX: guard concurrent sqlite writes
+                cur = self.conn.execute(
+                    "INSERT OR IGNORE INTO technologies "
+                    "(scan_id, host, name, category, version, confidence, source, evidence) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (record.scan_id, record.host, record.name, record.category,
+                     record.version, record.confidence, record.source, json.dumps(record.evidence)),
+                )
+                self.conn.commit()
+                return cur.lastrowid or 0
         except Exception:
             return 0
 
     def insert_certificate(self, record: CertificateRecord) -> int:
         try:
-            cur = self.conn.execute(
-                "INSERT OR IGNORE INTO certificates "
-                "(scan_id, host, subject, issuer, serial, not_before, not_after, san, fingerprint, source) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (record.scan_id, record.host, record.subject, record.issuer, record.serial,
-                 record.not_before, record.not_after, json.dumps(record.san),
-                 record.fingerprint, record.source),
-            )
-            self.conn.commit()
-            return cur.lastrowid or 0
+            with self._lock:  # BUG-002 FIX: guard concurrent sqlite writes
+                cur = self.conn.execute(
+                    "INSERT OR IGNORE INTO certificates "
+                    "(scan_id, host, subject, issuer, serial, not_before, not_after, san, fingerprint, source) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (record.scan_id, record.host, record.subject, record.issuer, record.serial,
+                     record.not_before, record.not_after, json.dumps(record.san),
+                     record.fingerprint, record.source),
+                )
+                self.conn.commit()
+                return cur.lastrowid or 0
         except Exception:
             return 0
 
     def insert_api_endpoint(self, record: APIEndpoint) -> int:
         try:
-            cur = self.conn.execute(
-                "INSERT OR IGNORE INTO api_endpoints "
-                "(scan_id, host, method, path, full_url, content_type, auth_required, source, api_type) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (record.scan_id, record.host, record.method, record.path, record.full_url,
-                 record.content_type, record.auth_required, record.source, record.api_type),
-            )
-            self.conn.commit()
-            return cur.lastrowid or 0
+            with self._lock:  # BUG-002 FIX: guard concurrent sqlite writes
+                cur = self.conn.execute(
+                    "INSERT OR IGNORE INTO api_endpoints "
+                    "(scan_id, host, method, path, full_url, content_type, auth_required, source, api_type) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (record.scan_id, record.host, record.method, record.path, record.full_url,
+                     record.content_type, record.auth_required, record.source, record.api_type),
+                )
+                self.conn.commit()
+                return cur.lastrowid or 0
         except Exception:
             return 0
 
@@ -663,35 +693,37 @@ class DatabaseManager:
 
     def insert_tool_run(self, record: ToolRunRecord) -> int:
         try:
-            cur = self.conn.execute(
-                "INSERT INTO tool_runs (scan_id, tool_name, module_name, command, status, exit_code, "
-                "duration, timed_out, output_file, started_at, completed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (record.scan_id, record.tool_name, record.module_name, record.command,
-                 record.status, record.exit_code, record.duration, int(record.timed_out),
-                 record.output_file, record.started_at.isoformat(),
-                 record.completed_at.isoformat() if record.completed_at else None),
-            )
-            self.conn.commit()
-            return cur.lastrowid or 0
+            with self._lock:  # BUG-002 FIX: guard concurrent sqlite writes
+                cur = self.conn.execute(
+                    "INSERT INTO tool_runs (scan_id, tool_name, module_name, command, status, exit_code, "
+                    "duration, timed_out, output_file, started_at, completed_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (record.scan_id, record.tool_name, record.module_name, record.command,
+                     record.status, record.exit_code, record.duration, int(record.timed_out),
+                     record.output_file, record.started_at.isoformat(),
+                     record.completed_at.isoformat() if record.completed_at else None),
+                )
+                self.conn.commit()
+                return cur.lastrowid or 0
         except Exception:
             return 0
 
     def insert_cloud_asset(self, record: CloudAssetRecord) -> int:
         """Insert a cloud asset, silently ignoring exact duplicates (same scan, provider, type, name)."""
         try:
-            cur = self.conn.execute(
-                "INSERT OR IGNORE INTO cloud_assets "
-                "(scan_id, provider, asset_type, asset_name, url, is_public, is_writable, "
-                "region, metadata, source, timestamp) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (record.scan_id, record.provider, record.asset_type, record.asset_name,
-                 record.url, int(record.is_public), int(record.is_writable),
-                 record.region, json.dumps(record.metadata), record.source,
-                 record.timestamp.isoformat()),
-            )
-            self.conn.commit()
-            return cur.lastrowid or 0
+            with self._lock:  # BUG-002 FIX: guard concurrent sqlite writes
+                cur = self.conn.execute(
+                    "INSERT OR IGNORE INTO cloud_assets "
+                    "(scan_id, provider, asset_type, asset_name, url, is_public, is_writable, "
+                    "region, metadata, source, timestamp) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (record.scan_id, record.provider, record.asset_type, record.asset_name,
+                     record.url, int(record.is_public), int(record.is_writable),
+                     record.region, json.dumps(record.metadata), record.source,
+                     record.timestamp.isoformat()),
+                )
+                self.conn.commit()
+                return cur.lastrowid or 0
         except Exception:
             return 0
 
@@ -750,6 +782,31 @@ class DatabaseManager:
                 (scan_id,),
             ).fetchall()
         ]
+
+    def update_finding_verification(
+        self,
+        finding_id: int,
+        confidence: str,
+        verified: int,
+        evidence: str,
+    ) -> None:
+        """Update a finding's verification status. Thread-safe public API.
+
+        Args:
+            finding_id: Primary key of the finding row.
+            confidence: New confidence string ('verified', 'likely', 'potential').
+            verified: 1 if confirmed true positive, 0 otherwise.
+            evidence: Accumulated evidence string to append / replace.
+        """
+        try:
+            with self._lock:
+                self.conn.execute(
+                    "UPDATE findings SET confidence = ?, verified = ?, evidence = ? WHERE id = ?",
+                    (confidence, verified, evidence, finding_id),
+                )
+                self.conn.commit()
+        except Exception:
+            pass
 
     def get_certificates(self, scan_id: str) -> list[dict[str, Any]]:
         return [

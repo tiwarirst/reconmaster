@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import time
 from typing import Any, ClassVar
+from urllib.parse import urlparse as _urlparse
 
 import httpx
 
@@ -46,6 +47,27 @@ class SecurityHeadersModule(ReconModule):
             "description": "Provides clickjacking protection.",
             "impact": "Application may be vulnerable to Clickjacking.",
         },
+        # BUG-015 FIX: add missing modern security headers commonly checked in security audits
+        "Permissions-Policy": {
+            "severity": Severity.LOW,
+            "description": "Controls browser feature access (camera, microphone, geolocation).",
+            "impact": "May allow unauthorized access to sensitive browser APIs.",
+        },
+        "Referrer-Policy": {
+            "severity": Severity.LOW,
+            "description": "Controls referrer information sent in cross-origin requests.",
+            "impact": "Sensitive URL parameters may leak to third-party sites via Referer header.",
+        },
+        "Cross-Origin-Opener-Policy": {
+            "severity": Severity.LOW,
+            "description": "Mitigates Spectre/XS-Leaks cross-origin attacks.",
+            "impact": "Application may be vulnerable to cross-origin information leakage.",
+        },
+        "Cross-Origin-Resource-Policy": {
+            "severity": Severity.LOW,
+            "description": "Controls which origins can load this resource.",
+            "impact": "Resources may be loaded by unauthorized cross-origin pages.",
+        },
     }
 
     async def run(self, **kwargs: Any) -> Any:
@@ -63,11 +85,26 @@ class SecurityHeadersModule(ReconModule):
         if not urls:
             return
 
+        # BUG-015 FIX: deduplicate URLs by origin so every distinct host gets checked; raise cap from 20 to 50
+        _seen_origins: set[str] = set()
+        urls_to_check: list[str] = []
+        for _u in urls:
+            try:
+                _parsed = _urlparse(_u)
+                _origin = f"{_parsed.scheme}://{_parsed.netloc}"
+                if _origin not in _seen_origins:
+                    _seen_origins.add(_origin)
+                    urls_to_check.append(_u)
+                if len(urls_to_check) >= 50:
+                    break
+            except Exception:
+                continue
+
         start = time.monotonic()
-        self.logger.module_start(self.config.name, target=f"{len(urls)} URLs")
+        self.logger.module_start(self.config.name, target=f"{len(urls_to_check)} unique origins")
 
         async with httpx.AsyncClient(verify=False, follow_redirects=True, timeout=10.0) as client:
-            tasks = [self._check_headers(client, url) for url in urls[:20]] # Limit to 20 to avoid spam
+            tasks = [self._check_headers(client, url) for url in urls_to_check]
             await asyncio.gather(*tasks, return_exceptions=True)
 
         duration = time.monotonic() - start

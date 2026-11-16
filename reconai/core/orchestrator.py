@@ -90,7 +90,8 @@ class Orchestrator:
             on_output=self.console.output_line if self.config.config.verbose else None
         )
         
-        self.db.connect()
+        # BUG-001 FIX: sqlite3.connect() is blocking I/O and must not be called in
+        # __init__ (which runs in the event loop on construction). Defer to prepare_scan().
         self._register_event_handlers()
         
         self.mode: str = "standard"
@@ -121,6 +122,8 @@ class Orchestrator:
 
     async def prepare_scan(self, mode: str, profile: str, timeout_override: int | None = None) -> None:
         """Initialize the scan record and plan module execution."""
+        # BUG-001 FIX: Open DB connection here (async context) rather than in __init__.
+        await self.db.async_connect()
         self.mode = mode
         self.profile = profile
         self.console.banner()
@@ -236,6 +239,14 @@ class Orchestrator:
         modules_failed = 0
         warnings = []
         
+        # BUG-018 FIX: build module kwargs once before the loop — per-module calls do N DB SELECTs unnecessarily
+        # Refresh only after modules that produce significant new data (discovered subdomains, ports, URLs).
+        _DATA_PRODUCING_MODULES = frozenset({
+            "subdomains_passive", "subdomains_active", "cert_transparency",
+            "http_probe", "httpx_probe", "port_scan", "nmap", "ports", "naabu_ports",
+        })
+        module_kwargs = self._build_module_kwargs()
+
         try:
             for module in self.modules_to_run:
                 self.console.info(f"Starting module: {module.config.description}", module=module.config.name)
@@ -256,7 +267,6 @@ class Orchestrator:
                 # Run module with strict timeout protection
                 try:
                     mod_start = time.monotonic()
-                    module_kwargs = self._build_module_kwargs()
                     mod_timeout = getattr(module, "timeout", None) or 180
 
                     await asyncio.wait_for(module.run(**module_kwargs), timeout=mod_timeout)
@@ -266,6 +276,10 @@ class Orchestrator:
                         f"Completed in {mod_duration:.1f}s", module=module.config.name
                     )
                     modules_completed += 1
+
+                    # BUG-018 FIX: refresh kwargs only after data-producing modules to avoid N redundant DB queries
+                    if module.config.name in _DATA_PRODUCING_MODULES:
+                        module_kwargs = self._build_module_kwargs()
 
                     # Collect actionable warnings and tool install guidance from module
                     if hasattr(module, "warnings") and module.warnings:
@@ -298,6 +312,7 @@ class Orchestrator:
             
         finally:
             await self.process_mgr.kill_all()
+            self.db.close()  # BUG-003 FIX: ensure SQLite connection is released on scan completion
             
         duration = time.monotonic() - start_time
         self.db.update_scan_status(

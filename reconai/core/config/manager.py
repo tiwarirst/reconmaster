@@ -5,6 +5,7 @@ Supports: default values → YAML files → environment variables → CLI overri
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -28,11 +29,14 @@ class ConfigManager:
         self._config_path = config_path
         self._raw: dict[str, Any] = {}
         self._config: ReconAIConfig | None = None
+        self._config_lock = threading.Lock()  # BUG-036 FIX: thread-safe lazy init
 
     @property
     def config(self) -> ReconAIConfig:
         if self._config is None:
-            self._config = self._load()
+            with self._config_lock:  # BUG-036 FIX: prevent double-load in concurrent access
+                if self._config is None:
+                    self._config = self._load()
         return self._config
 
     def _load(self) -> ReconAIConfig:
@@ -67,10 +71,12 @@ class ConfigManager:
                 setattr(cfg, key, value)
 
     def get_timeout(self, key: str) -> int:
-        return self.config.timeouts.get(key)
+        # BUG-012 FIX: config.timeouts is a Pydantic model, not a dict — use getattr not .get()
+        return getattr(self.config.timeouts, key, 60)
 
     def get_concurrency(self, key: str) -> int:
-        return self.config.concurrency.get(key)
+        # BUG-012 FIX: config.concurrency is a Pydantic model, not a dict — use getattr not .get()
+        return getattr(self.config.concurrency, key, 10)
 
     def _find_default_config(self) -> Path | None:
         """Look for default config in standard locations."""

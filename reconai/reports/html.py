@@ -188,45 +188,126 @@ def generate_html_report(
         _stat_card("Cloud Assets", stats.get("cloud_assets", 0)),
     ])
 
-    # 1. Findings table with interactive PoC verification
+    # 1. Findings table with per-finding PoC verification panel
     if findings:
         from reconai.intelligence.poc_generator import PoCGenerator
         poc_gen = PoCGenerator()
         rows = []
         for f in findings:
             poc = poc_gen.generate(f)
+
+            # Impact description line
+            impact_html = ""
+            if poc.impact_description:
+                impact_html = (
+                    '<div style="color:var(--low);font-size:0.8rem;margin-top:0.4rem;'
+                    f'font-style:italic;">{html_lib.escape(poc.impact_description)}</div>'
+                )
+
+            # Evidence / why-detected line
+            evidence_html = ""
+            if f.get("why_detected"):
+                evidence_html = (
+                    '<div style="color:var(--low);font-size:0.75rem;margin-top:0.25rem;">'
+                    f'<em>Evidence: {html_lib.escape(str(f["why_detected"]))}</em></div>'
+                )
+
+            # Curl PoC block
             curl_html = ""
             if poc.curl_command:
                 curl_html = (
-                    f'<details style="margin-top:0.4rem;cursor:pointer;">'
-                    f'<summary style="color:var(--accent);font-size:0.8rem;font-weight:600;">🔍 Run Verification PoC (Curl)</summary>'
-                    f'<pre style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:0.5rem;margin-top:0.3rem;overflow-x:auto;font-size:0.75rem;color:#7ee787;"><code>{html_lib.escape(poc.curl_command)}</code></pre>'
-                    f'</details>'
+                    '<details style="margin-top:0.5rem;cursor:pointer;">'
+                    '<summary style="color:var(--accent);font-size:0.8rem;font-weight:600;'
+                    'user-select:none;">&#x1F50D; Curl Verification</summary>'
+                    '<pre style="background:var(--bg);border:1px solid var(--border);'
+                    'border-radius:4px;padding:0.6rem;margin-top:0.3rem;'
+                    'overflow-x:auto;font-size:0.75rem;color:#7ee787;">'
+                    f'<code>{html_lib.escape(poc.curl_command)}</code></pre>'
+                    '</details>'
                 )
-            evidence_html = ""
-            if f.get("why_detected"):
-                evidence_html = f'<div style="color:var(--low);font-size:0.75rem;margin-top:0.25rem;"><em>Why: {html_lib.escape(str(f["why_detected"]))}</em></div>'
+
+            # Python script PoC block
+            python_html = ""
+            if poc.python_script:
+                python_html = (
+                    '<details style="margin-top:0.3rem;cursor:pointer;">'
+                    '<summary style="color:#e3b341;font-size:0.8rem;font-weight:600;'
+                    'user-select:none;">&#x1F40D; Python PoC Script</summary>'
+                    '<pre style="background:var(--bg);border:1px solid #e3b34140;'
+                    'border-radius:4px;padding:0.6rem;margin-top:0.3rem;'
+                    'overflow-x:auto;font-size:0.72rem;color:#e3b341;">'
+                    f'<code>{html_lib.escape(poc.python_script)}</code></pre>'
+                    '</details>'
+                )
+
+            # Verification checklist
+            steps_html = ""
+            if poc.verification_steps:
+                steps_li = "".join(
+                    f'<li style="margin-bottom:0.2rem;">{html_lib.escape(s)}</li>'
+                    for s in poc.verification_steps
+                )
+                steps_html = (
+                    '<details style="margin-top:0.3rem;cursor:pointer;">'
+                    '<summary style="color:#bc8cff;font-size:0.8rem;font-weight:600;'
+                    'user-select:none;">&#x2705; Verification Steps</summary>'
+                    '<ol style="margin:0.4rem 0 0 1.2rem;font-size:0.78rem;'
+                    f'color:var(--text);line-height:1.7;">{steps_li}</ol>'
+                    '</details>'
+                )
+
+            # Raw HTTP request block
+            raw_http_html = ""
+            if poc.raw_http_request:
+                raw_http_html = (
+                    '<details style="margin-top:0.3rem;cursor:pointer;">'
+                    '<summary style="color:#8b949e;font-size:0.8rem;font-weight:600;'
+                    'user-select:none;">&#x1F4E1; Raw HTTP Request</summary>'
+                    '<pre style="background:var(--bg);border:1px solid var(--border);'
+                    'border-radius:4px;padding:0.6rem;margin-top:0.3rem;'
+                    'overflow-x:auto;font-size:0.72rem;color:#8b949e;">'
+                    f'<code>{html_lib.escape(poc.raw_http_request)}</code></pre>'
+                    '</details>'
+                )
+
+            poc_section = curl_html + python_html + steps_html + raw_http_html
 
             rows.append(
-                f'<tr><td class="{_sev_class(f["severity"])}">{f["severity"].upper()}</td>'
-                f'<td><strong>{html_lib.escape(f["title"])}</strong>{evidence_html}{curl_html}</td>'
-                f'<td><code>{html_lib.escape(f["affected_asset"])}</code></td>'
-                f'<td>{f["confidence"]}</td></tr>'
+                f'<tr>'
+                f'<td class="{_sev_class(f["severity"])}" style="vertical-align:top;'
+                f'white-space:nowrap;">{f["severity"].upper()}</td>'
+                f'<td style="vertical-align:top;">'
+                f'<strong>{html_lib.escape(f["title"])}</strong>'
+                f'{evidence_html}{impact_html}{poc_section}</td>'
+                f'<td style="vertical-align:top;"><code>{html_lib.escape(f["affected_asset"])}</code></td>'
+                f'<td style="vertical-align:top;">{f["confidence"]}</td></tr>'
             )
-        findings_table = f'<table><tr><th>Severity</th><th>Vulnerability & PoC</th><th>Affected Asset</th><th>Confidence</th></tr>{"".join(rows)}</table>'
+        findings_table = (
+            '<table><tr><th>Severity</th><th>Vulnerability &amp; PoC</th>'
+            '<th>Affected Asset</th><th>Confidence</th></tr>'
+            + "".join(rows) + '</table>'
+        )
     else:
         findings_table = "<p style='color:var(--low);'>No security vulnerabilities discovered.</p>"
 
-    # 2. Visual Screenshots Gallery
+
+    # BUG-019 FIX: embed screenshots as Base64 data URIs for portability — relative paths break when report is moved/copied
     if png_files:
         card_htmls = []
         for p in png_files[:24]:  # Top 24 screenshots
-            rel_path = f"../screenshots/{p.relative_to(screenshots_base).as_posix()}"
+            try:
+                _img_bytes = p.read_bytes()
+                _img_b64 = base64.b64encode(_img_bytes).decode("ascii")
+                _img_ext = p.suffix.lstrip(".").lower() or "png"
+                _img_src = f"data:image/{_img_ext};base64,{_img_b64}"
+            except Exception:
+                # Fallback to relative path if file unreadable
+                _img_src = f"../screenshots/{p.relative_to(screenshots_base).as_posix()}"
             caption = p.stem.replace("_", " ")[:60]
             card_htmls.append(
                 f'<div class="screenshot-card">'
-                f'<a href="{rel_path}" target="_blank">'
-                f'<img src="{rel_path}" alt="{caption}" loading="lazy">'
+                f'<a href="{_img_src}" target="_blank">'
+                f'<img src="{_img_src}" alt="{caption}" loading="lazy">'
                 f'<div class="screenshot-caption">{caption}</div>'
                 f'</a></div>'
             )
@@ -251,6 +332,7 @@ def generate_html_report(
             method = str(u.get("method") or "GET").upper()
             m_badge = f'<span class="badge-method badge-{method.lower()}">{method}</span>'
             url_str = str(u.get("url") or "")
+            _url_safe = html_lib.escape(url_str)  # BUG-006 FIX: escape URLs to prevent XSS via crafted href values
             source = str(u.get("source") or "crawler")
             content_type = str(u.get("content_type") or "").split(";")[0]
 
@@ -258,7 +340,7 @@ def generate_html_report(
                 f'<tr>'
                 f'<td>{m_badge}</td>'
                 f'<td>{st_badge}</td>'
-                f'<td><a class="url-link" href="{url_str}" target="_blank" rel="noopener">{url_str}</a></td>'
+                f'<td><a class="url-link" href="{_url_safe}" target="_blank" rel="noopener">{_url_safe}</a></td>'
                 f'<td><code>{content_type}</code></td>'
                 f'<td><span class="badge badge-other">{source}</span></td>'
                 f'</tr>'
@@ -418,6 +500,14 @@ def generate_html_report(
         )
     ai_section = "".join(ai_parts)
 
+    # BUG-025 FIX: show display cap in heading when total exceeds the rendered limit — heading "5000" but table shows 150 is misleading
+    _URL_DISPLAY_CAP = 150
+    url_count_heading = (
+        f"showing {_URL_DISPLAY_CAP} of {len(urls)}"
+        if len(urls) > _URL_DISPLAY_CAP
+        else len(urls)
+    )
+
     html = _HTML_TEMPLATE.format(
         target=scan["target"],
         scan_id=scan_id,
@@ -432,7 +522,7 @@ def generate_html_report(
         findings_table=findings_table,
         screenshot_count=len(png_files),
         screenshots_gallery=screenshots_gallery,
-        url_count=len(urls),
+        url_count=url_count_heading,
         urls_table=urls_table,
         api_count=len(apis),
         apis_table=apis_table,

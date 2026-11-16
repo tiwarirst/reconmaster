@@ -279,7 +279,33 @@ api_keys:
 #   url: "http://192.168.1.50:11434"
 # ════════════════════════════════════════════════════════════════════════════════
 ai:
+  # ── Set enabled: true to automatically use AI analysis in every scan ──────
+  # No --ai flag needed once enabled is true.
   enabled: false
+
+  # ── LLM Provider ─────────────────────────────────────────────────────────
   provider: "ollama"
+
+  # ── Remote GPU Machine Setup ──────────────────────────────────────────────
+  # Step 1: On your GPU machine, set: OLLAMA_HOST=0.0.0.0:11434
+  # Step 2: Run: ollama pull llama3   (or any model below)
+  # Step 3: Set the URL below to http://<YOUR_GPU_IP>:11434
+  #
+  # Alternatively, use an SSH tunnel if the GPU is on a private network:
+  #   ssh -L 11434:localhost:11434 user@<gpu-ip>
+  #   Then keep url: "http://localhost:11434"
+  #
+  # Local machine (default):
   url: "http://localhost:11434"
+  #
+  # Remote GPU example (uncomment and edit):
+  # url: "http://192.168.1.50:11434"
+
+  # ── Model Selection ───────────────────────────────────────────────────────
+  # Recommended offensive security models:
+  #   llama3              – Fast general reasoning & reporting
+  #   deepseek-r1:7b      – Deep chain-of-thought vulnerability reasoning
+  #   mistral             – Compact, high-precision technical analysis
+  #   dolphin-llama3      – Uncensored offensive posture analysis
+  #   qwen2.5-coder:7b    – Payload, script & source code comprehension
   model: "llama3"

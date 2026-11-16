@@ -32,6 +32,20 @@ from reconai.core.executor.timeout_manager import TimeoutManager
 # and parentheses are common in flags/user-agents/code.
 _DANGEROUS_CHARS = re.compile(r'[;&|`$<>!\n\r]')
 
+# BUG-027 FIX: Some tools do not support --version and exit non-zero or crash on it.
+# Map tool binaries that need an alternative probe flag to their preferred flag(s).
+_VERSION_FLAGS: dict[str, list[str]] = {
+    "arjun": ["-h"],
+    "cloud_enum": ["--help"],
+    "cloudenum": ["--help"],
+    "gitdumper": ["--help"],
+    "git-dumper": ["--help"],
+    "gau": ["--help"],
+    "waybackurls": ["-h"],
+    "hakrawler": ["-h"],
+    "katana": ["-h"],
+}
+
 
 class CommandRunner:
     """Executes external commands safely and asynchronously.
@@ -177,6 +191,8 @@ class CommandRunner:
                 self._process_mgr.register(process)
 
                 # Stream output with timeout
+                stdout_task = None  # BUG-005 FIX: initialize before try so CancelledError handler can safely reference them
+                stderr_task = None  # BUG-005 FIX: initialize before try so CancelledError handler can safely reference them
                 try:
                     # stdout/stderr are guaranteed non-None since we used stdout=PIPE
                     assert process.stdout is not None
@@ -233,7 +249,7 @@ class CommandRunner:
                     return CommandResult(
                         command=command,
                         status=CommandStatus.TIMEOUT,
-                        exit_code=process.returncode,
+                        exit_code=process.returncode if process.returncode is not None else -1,  # BUG-007 FIX: returncode may be None immediately after kill signal
                         stdout=stdout_data,
                         stderr=stderr_data,
                         duration=duration,
@@ -252,9 +268,9 @@ class CommandRunner:
 
         except asyncio.CancelledError:
             try:
-                if "stdout_task" in locals():
+                if stdout_task is not None:  # BUG-005 FIX: use is not None instead of locals() check
                     stdout_task.cancel()
-                if "stderr_task" in locals():
+                if stderr_task is not None:  # BUG-005 FIX: use is not None instead of locals() check
                     stderr_task.cancel()
                 if "process" in locals():
                     await self._process_mgr.kill_process(process)
@@ -285,8 +301,10 @@ class CommandRunner:
             return False, ""
 
         try:
+            # BUG-027 FIX: Use tool-specific probe flag; fall back to --version for unknown tools.
+            _flags = _VERSION_FLAGS.get(binary, ["--version"])
             result = await self.run(
-                command=[binary, "--version"],
+                command=[binary] + _flags,
                 timeout=10,
                 validate_args=False,
             )

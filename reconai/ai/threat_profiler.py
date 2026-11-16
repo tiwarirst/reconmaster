@@ -42,6 +42,70 @@ _TECH_ACTOR_MAP: dict[str, list[dict[str, str]]] = {
     "jenkins": [
         {"actor": "Lazarus Group", "motive": "Software Supply Chain Compromise", "technique": "T1195.002 - Compromise Software Supply Chain"},
     ],
+    # BUG-026 FIX: expand tech→actor mapping to cover modern web stack technologies
+    "iis": [
+        {"actor": "APT41", "motive": "Initial Access via IIS Exploits", "technique": "T1190 - Exploit Public-Facing Application"},
+        {"actor": "Volt Typhoon", "motive": "Espionage & Living-off-the-Land", "technique": "T1190 - Exploit Public-Facing Application"},
+        {"actor": "FIN7", "motive": "Financial Crime / Ransomware Deployment", "technique": "T1190 - Exploit Public-Facing Application"},
+    ],
+    "tomcat": [
+        {"actor": "APT41", "motive": "RCE via AJP / Ghostcat", "technique": "T1190 - Exploit Public-Facing Application"},
+        {"actor": "Lazarus Group", "motive": "Supply Chain & Server Compromise", "technique": "T1195.002 - Compromise Software Supply Chain"},
+        {"actor": "Carbanak", "motive": "Financial System Exploitation", "technique": "T1190 - Exploit Public-Facing Application"},
+    ],
+    "spring": [
+        {"actor": "APT41", "motive": "RCE via Spring4Shell (CVE-2022-22965)", "technique": "T1190 - Exploit Public-Facing Application"},
+        {"actor": "Hafnium", "motive": "Espionage via Framework Exploitation", "technique": "T1190 - Exploit Public-Facing Application"},
+        {"actor": "TeamTNT", "motive": "Cryptojacking via RCE", "technique": "T1610 - Deploy Container"},
+    ],
+    "django": [
+        {"actor": "Targeted Web Attacks", "motive": "Debug Mode / Secret Key Exploitation", "technique": "T1190 - Exploit Public-Facing Application"},
+        {"actor": "TeamTNT", "motive": "Cryptojacking via Misconfiguration", "technique": "T1610 - Deploy Container"},
+    ],
+    "flask": [
+        {"actor": "Targeted Web Attacks", "motive": "SSTI / Debug Pin Exploitation", "technique": "T1190 - Exploit Public-Facing Application"},
+        {"actor": "Supply Chain Actors", "motive": "Dependency Confusion Attacks", "technique": "T1195.001 - Compromise Software Dependencies"},
+    ],
+    "docker": [
+        {"actor": "TeamTNT", "motive": "Container Escape & Cryptojacking", "technique": "T1610 - Deploy Container"},
+        {"actor": "Kinsing", "motive": "Cryptomining via Exposed Docker API", "technique": "T1610 - Deploy Container"},
+        {"actor": "Cryptojacking Groups", "motive": "Resource Hijacking", "technique": "T1496 - Resource Hijacking"},
+    ],
+    "azure": [
+        {"actor": "APT29", "motive": "Espionage via Azure AD Compromise", "technique": "T1078.004 - Cloud Accounts Compromise"},
+        {"actor": "Midnight Blizzard", "motive": "Identity & Credential Theft", "technique": "T1078.004 - Cloud Accounts Compromise"},
+        {"actor": "Volt Typhoon", "motive": "Critical Infrastructure Espionage", "technique": "T1078.004 - Cloud Accounts Compromise"},
+    ],
+    "gcp": [
+        {"actor": "TeamTNT", "motive": "GCP Credential Theft & Cryptomining", "technique": "T1552.005 - Cloud Instance Metadata API"},
+        {"actor": "Kinsing", "motive": "Resource Hijacking via Exposed Services", "technique": "T1496 - Resource Hijacking"},
+        {"actor": "Crypto Mining Groups", "motive": "Compute Resource Hijacking", "technique": "T1496 - Resource Hijacking"},
+    ],
+    "redis": [
+        {"actor": "TeamTNT", "motive": "Unauthenticated Redis RCE / Cryptomining", "technique": "T1190 - Exploit Public-Facing Application"},
+        {"actor": "Kinsing", "motive": "Redis Slave RCE for Cryptominer Deployment", "technique": "T1190 - Exploit Public-Facing Application"},
+        {"actor": "Muhstik", "motive": "Botnet Propagation via Redis", "technique": "T1190 - Exploit Public-Facing Application"},
+    ],
+    "mongodb": [
+        {"actor": "Data Extortion Groups", "motive": "Unauthenticated DB Wipe & Ransom", "technique": "T1485 - Data Destruction"},
+        {"actor": "Meow Ransomware", "motive": "Automated MongoDB Wipe Attacks", "technique": "T1485 - Data Destruction"},
+    ],
+    "elasticsearch": [
+        {"actor": "Data Extortion Groups", "motive": "Unauthenticated Index Exfiltration & Ransom", "technique": "T1530 - Data from Cloud Storage Object"},
+        {"actor": "Meow Ransomware", "motive": "Automated Elasticsearch Destruction", "technique": "T1485 - Data Destruction"},
+    ],
+    "react": [
+        {"actor": "Supply Chain Actors", "motive": "npm Dependency Confusion / Malicious Packages", "technique": "T1195.001 - Compromise Software Dependencies"},
+        {"actor": "Magecart", "motive": "JavaScript Skimming via Compromised CDNs", "technique": "T1059.007 - JavaScript Injection"},
+    ],
+    "express": [
+        {"actor": "Supply Chain Actors", "motive": "npm Package Hijacking", "technique": "T1195.001 - Compromise Software Dependencies"},
+        {"actor": "Targeted Web Attacks", "motive": "Prototype Pollution / RCE", "technique": "T1190 - Exploit Public-Facing Application"},
+    ],
+    "node": [
+        {"actor": "Supply Chain Actors", "motive": "npm Malicious Package Distribution", "technique": "T1195.001 - Compromise Software Dependencies"},
+        {"actor": "Targeted Web Attacks", "motive": "Deserialization / Prototype Pollution Attacks", "technique": "T1190 - Exploit Public-Facing Application"},
+    ],
 }
 
 
@@ -62,8 +126,24 @@ class ThreatActorProfiler:
         findings = self.db.get_findings(self.scan_id)
 
         detected_names = [t.get("name", "").lower() for t in techs if t.get("name")]
-        if cloud_assets:
-            detected_names.append("aws")
+        # Bug #11 fix: map actual cloud providers instead of always assuming AWS
+        _provider_key_map = {
+            "aws": "aws",
+            "amazon": "aws",
+            "s3": "aws",
+            "gcp": "gcp",
+            "google": "gcp",
+            "gcs": "gcp",
+            "azure": "azure",
+            "microsoft": "azure",
+        }
+        for ca in cloud_assets:
+            provider_raw = str(ca.get("provider", "")).lower()
+            for keyword, mapped in _provider_key_map.items():
+                if keyword in provider_raw:
+                    if mapped not in detected_names:
+                        detected_names.append(mapped)
+                    break
 
         matched_actors: list[dict[str, str]] = []
         mitre_techniques: set[str] = {

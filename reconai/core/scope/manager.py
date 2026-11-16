@@ -24,11 +24,22 @@ class ScopeManager:
             # proceed with scanning
     """
 
+    # BUG-022 FIX: bound the scope check cache to prevent unbounded memory growth on deep crawls (5000+ URLs)
+    _MAX_SCOPE_CACHE = 2000
+
     def __init__(self, scope: ScopeDefinition, strict: bool = True):
         self._scope = scope
         self.strict = strict
         self._validator = ScopeValidator(scope)
         self._checked: dict[str, bool] = {}
+
+    def _cache_put(self, key: str, value: bool) -> None:
+        """Add to scope cache, evicting oldest entries when at capacity."""
+        if len(self._checked) >= self._MAX_SCOPE_CACHE:
+            # Evict the first (oldest) entry — O(1) for dict in Python 3.7+
+            oldest = next(iter(self._checked))
+            del self._checked[oldest]
+        self._checked[key] = value
 
     @classmethod
     def for_target(cls, target: str, strict: bool = True) -> ScopeManager:
@@ -63,7 +74,7 @@ class ScopeManager:
             return self._checked[target]
 
         result = self._validator.is_target_allowed(target)
-        self._checked[target] = result
+        self._cache_put(target, result)  # BUG-022 FIX: use bounded cache to prevent unbounded memory growth
         return result
 
     def is_in_scope(self, target: str) -> bool:
